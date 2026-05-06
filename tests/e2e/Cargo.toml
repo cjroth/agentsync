@@ -1,0 +1,28 @@
+[package]
+name = "agentsync-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+agentsync-core = { path = "../../crates/agentsync-core" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile = "3"
+futures-util.workspace = true
+uuid.workspace = true
+
+[[test]]
+name = "two_peer_sync"
+path = "tests/two_peer_sync.rs"
+
+[[test]]
+name = "crash_recovery"
+path = "tests/crash_recovery.rs"
+
+[[test]]
+name = "extension_filter"
+path = "tests/extension_filter.rs"
