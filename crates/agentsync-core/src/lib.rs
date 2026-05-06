@@ -18,7 +18,7 @@ pub use doc::{
 };
 pub use error::{Error, Result};
 pub use fs::{BindOptions, Binding, NodeFsAdapter};
-pub use net::{Frame, HelloOp};
+pub use net::{discover_vault_id, Frame, HelloOp};
 pub use vault::{
     CreateOptions, CreatedVault, OpenOptions, SyncHandle, Vault, VaultConfig, VaultEvent,
     VaultEventKind, VaultId,

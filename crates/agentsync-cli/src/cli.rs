@@ -63,12 +63,18 @@ pub struct WatchArgs {
 
 #[derive(Debug, Args)]
 pub struct CloneArgs {
-    pub vault_id: String,
+    /// Local directory to clone into.
     pub local_path: PathBuf,
+    /// Rendezvous WebSocket URL (e.g. ws://host:port).
     #[arg(long)]
-    pub rendezvous: Option<String>,
+    pub rendezvous: String,
+    /// Vault key (base64). Omit to read from $AGENTSYNC_KEY.
     #[arg(long)]
     pub key: Option<String>,
+    /// Optional vault id. If omitted, discovered from the server during
+    /// the handshake — typo-safety for users who already know it.
+    #[arg(long)]
+    pub vault_id: Option<String>,
 }
 
 #[derive(Debug, Args)]

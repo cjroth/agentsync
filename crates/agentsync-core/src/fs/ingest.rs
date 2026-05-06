@@ -94,6 +94,35 @@ async fn ingest_file(
         Ok(b) => b,
         Err(_) => return Ok(()),
     };
+
+    // Guard against the slow-truncate-write pattern: some editors leave the
+    // file empty for >150ms between O_TRUNC and the actual write, which is
+    // longer than our event debounce window. Ingesting that transient empty
+    // state would propagate as a real change and the materializer on peers
+    // would write empty over their disks. If we see empty on disk but the
+    // doc still has non-empty content, wait 300ms and re-read; in the common
+    // case the editor has finished by then. Genuine emptying just gets a
+    // small extra latency.
+    let bytes = if bytes.is_empty() {
+        let doc_has_content = {
+            let mut doc = inner.doc.lock().await;
+            doc.read_file(vault_path)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        };
+        if doc_has_content {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            match binding.adapter().read(&abs).await {
+                Ok(b) => b,
+                Err(_) => return Ok(()),
+            }
+        } else {
+            bytes
+        }
+    } else {
+        bytes
+    };
+
     let size = bytes.len() as u64;
     if binding.over_size(vault_path, size) {
         warn!(vault_path, size, "skipping oversize file");
@@ -124,8 +153,16 @@ async fn ingest_file(
                         path: vault_path.to_string(),
                     },
                 });
-                let mut mat = binding.materialized.lock().await;
-                mat.insert(vault_path.to_string(), h);
+                binding
+                    .materialized
+                    .lock()
+                    .await
+                    .insert(vault_path.to_string(), h.clone());
+                binding
+                    .last_ingested
+                    .lock()
+                    .await
+                    .insert(vault_path.to_string(), h);
                 return Ok(());
             }
         };
@@ -134,8 +171,16 @@ async fn ingest_file(
             let mut doc = inner.doc.lock().await;
             if let Ok(cur) = doc.read_file(vault_path) {
                 if cur == s {
-                    let mut mat = binding.materialized.lock().await;
-                    mat.insert(vault_path.to_string(), hash);
+                    binding
+                        .materialized
+                        .lock()
+                        .await
+                        .insert(vault_path.to_string(), hash.clone());
+                    binding
+                        .last_ingested
+                        .lock()
+                        .await
+                        .insert(vault_path.to_string(), hash);
                     return Ok(());
                 }
             }
@@ -149,8 +194,16 @@ async fn ingest_file(
                 path: vault_path.to_string(),
             },
         });
-        let mut mat = binding.materialized.lock().await;
-        mat.insert(vault_path.to_string(), hash);
+        binding
+            .materialized
+            .lock()
+            .await
+            .insert(vault_path.to_string(), hash.clone());
+        binding
+            .last_ingested
+            .lock()
+            .await
+            .insert(vault_path.to_string(), hash);
     } else {
         let h = inner.blob_store.put(&bytes).await?;
         let mut doc = inner.doc.lock().await;
@@ -162,8 +215,16 @@ async fn ingest_file(
                 path: vault_path.to_string(),
             },
         });
-        let mut mat = binding.materialized.lock().await;
-        mat.insert(vault_path.to_string(), h);
+        binding
+            .materialized
+            .lock()
+            .await
+            .insert(vault_path.to_string(), h.clone());
+        binding
+            .last_ingested
+            .lock()
+            .await
+            .insert(vault_path.to_string(), h);
     }
     Ok(())
 }

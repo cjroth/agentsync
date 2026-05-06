@@ -10,6 +10,44 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
+/// One-shot connect to ask the server what its vault_id is. Used by clients
+/// that only have a rendezvous URL + key and want to discover the vault to
+/// join. The returned `vault_id` should be persisted locally so subsequent
+/// runs can validate the connection.
+pub async fn discover_vault_id(url: &str, vault_key: VaultKey) -> Result<String> {
+    let (ws, _) = connect_async(url).await?;
+    let (mut writer, mut reader) = ws.split();
+
+    let hello = Frame::Hello {
+        vault_id: None,
+        auth_token: derive_auth_token(&vault_key).to_vec(),
+        op: HelloOp::Join,
+    };
+    writer.send(Message::binary(hello.encode()?)).await?;
+
+    while let Some(msg) = reader.next().await {
+        let bytes = match msg {
+            Ok(Message::Binary(b)) => b,
+            Ok(Message::Close(_)) => break,
+            Ok(_) => continue,
+            Err(e) => return Err(Error::WebSocket(e.to_string())),
+        };
+        let frame = Frame::decode(&bytes)?;
+        match frame {
+            Frame::HelloAck { vault_id } => {
+                let _ = writer.send(Message::Close(None)).await;
+                let _ = writer.close().await;
+                return Ok(vault_id);
+            }
+            Frame::Error { message } => {
+                return Err(Error::Auth(message));
+            }
+            _ => continue,
+        }
+    }
+    Err(Error::Network("no HelloAck received".into()))
+}
+
 pub struct ClientConn {
     pub _tasks: Vec<JoinHandle<()>>,
 }
@@ -27,7 +65,7 @@ impl ClientConn {
 
         // HELLO
         let hello = Frame::Hello {
-            vault_id: vault_id.clone(),
+            vault_id: Some(vault_id.clone()),
             auth_token: derive_auth_token(&vault_key).to_vec(),
             op: HelloOp::Join,
         };

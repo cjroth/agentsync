@@ -1,6 +1,6 @@
 use crate::cli::CloneArgs;
 use crate::config::{ConfigFile, KeySection, SyncSection, VaultSection};
-use agentsync_core::{decode_key, OpenOptions, Vault};
+use agentsync_core::{decode_key, discover_vault_id, OpenOptions, Vault};
 use anyhow::{Context, Result};
 
 pub async fn run(args: CloneArgs) -> Result<()> {
@@ -12,14 +12,30 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     let target = target.canonicalize()?;
     let storage = target.join(".agentsync");
 
-    let key_b64 = args.key.clone().or_else(|| std::env::var("AGENTSYNC_KEY").ok())
+    let key_b64 = args
+        .key
+        .clone()
+        .or_else(|| std::env::var("AGENTSYNC_KEY").ok())
         .context("--key not provided and AGENTSYNC_KEY env var not set")?;
     let key = decode_key(&key_b64)?;
 
+    // Discover the vault_id from the server if the user didn't pass one.
+    // This is the option-1 UX: the rendezvous URL + key is all the user needs.
+    let vault_id = match args.vault_id.clone() {
+        Some(v) => v,
+        None => {
+            println!("discovering vault at {}…", args.rendezvous);
+            discover_vault_id(&args.rendezvous, key)
+                .await
+                .with_context(|| format!("discover vault_id at {}", args.rendezvous))?
+        }
+    };
+    println!("vault_id: {}", vault_id);
+
     let cfg = ConfigFile {
         vault: VaultSection {
-            id: Some(args.vault_id.clone()),
-            rendezvous_url: args.rendezvous.clone(),
+            id: Some(vault_id.clone()),
+            rendezvous_url: Some(args.rendezvous.clone()),
         },
         key: KeySection {
             source: Some("env".into()),
@@ -33,22 +49,19 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     let bind_opts = cfg.sync.to_bind_options();
 
     let opts = OpenOptions {
-        rendezvous_url: args.rendezvous.clone(),
-        vault_id: args.vault_id.clone(),
+        rendezvous_url: Some(args.rendezvous.clone()),
+        vault_id,
         vault_key: key,
         storage_path: storage,
     };
     let mut vault = Vault::open(opts).await?;
     let _binding = vault.bind_directory(&target, bind_opts).await?;
-    if args.rendezvous.is_some() {
-        if let Err(e) = vault.connect().await {
-            anyhow::bail!("connect to rendezvous failed: {}", e);
-        }
-        println!("connected; downloading vault state. Press Ctrl-C to stop after sync.");
-        tokio::signal::ctrl_c().await?;
-    } else {
-        println!("offline clone; vault metadata written to {}", target.display());
+    if let Err(e) = vault.connect().await {
+        anyhow::bail!("connect to rendezvous failed: {}", e);
     }
+    println!("connected to {}", args.rendezvous);
+    println!("syncing into {} — Ctrl-C to stop.", target.display());
+    tokio::signal::ctrl_c().await?;
     vault.flush().await?;
     Ok(())
 }

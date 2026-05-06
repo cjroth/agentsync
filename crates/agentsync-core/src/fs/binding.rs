@@ -79,6 +79,11 @@ pub struct Binding {
     pub(crate) dirty: Arc<Mutex<DirtySet>>,
     /// path-in-doc -> content hash currently materialized on disk
     pub(crate) materialized: Arc<Mutex<HashMap<String, String>>>,
+    /// path-in-doc -> hash of the disk content that we most recently ingested
+    /// into the doc. Used by the materializer to recognise that a disk-state
+    /// the user just saved has already been captured by the doc, so it's safe
+    /// to overwrite with the doc's (possibly merged) content.
+    pub(crate) last_ingested: Arc<Mutex<HashMap<String, String>>>,
     _watcher: Option<Box<dyn Watcher>>,
 }
 
@@ -94,6 +99,7 @@ impl Binding {
             adapter,
             dirty: Arc::new(Mutex::new(DirtySet::new())),
             materialized: Arc::new(Mutex::new(HashMap::new())),
+            last_ingested: Arc::new(Mutex::new(HashMap::new())),
             _watcher: None,
         }
     }

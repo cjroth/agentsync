@@ -11,15 +11,19 @@ pub enum HelloOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum Frame {
-    /// Client → server handshake.
+    /// Client → server handshake. `vault_id` is optional: a fresh client that
+    /// only has a rendezvous URL + key can omit it, and the server's HelloAck
+    /// response carries the vault_id back.
     #[serde(rename = "hello")]
     Hello {
-        vault_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault_id: Option<String>,
         #[serde(with = "serde_bytes")]
         auth_token: Vec<u8>,
         op: HelloOp,
     },
-    /// Server → client acknowledgement.
+    /// Server → client acknowledgement. Always includes the server's vault_id
+    /// so a client connecting without one can persist it locally.
     #[serde(rename = "hello_ack")]
     HelloAck { vault_id: String },
     /// Opaque Automerge sync message.

@@ -490,18 +490,16 @@ impl Vault {
         // missing from disk (e.g. clone case).
         self.materialize(&binding).await?;
 
-        // Inbound watcher loop.
+        // Inbound watcher loop with per-path debouncing. Editors that save via
+        // truncate+write produce a transient empty state; without debouncing
+        // we'd ingest empty content into the doc and propagate it to peers
+        // before the second write lands. Coalescing fs events for ~150ms means
+        // we only ever see the final post-save state.
         {
             let inner = self.inner.clone();
             let binding = binding.clone();
             tokio::spawn(async move {
-                while let Some(ev) = rx.recv().await {
-                    if let Err(e) =
-                        crate::fs::ingest::handle_fs_event(&inner, &binding, ev).await
-                    {
-                        warn!(error=%e, "fs event handler");
-                    }
-                }
+                debounced_fs_loop(inner, binding, rx).await;
             });
         }
 
@@ -625,6 +623,81 @@ impl SyncHandle for VaultSyncHandle {
     }
 }
 
+// -- fs event debouncing (disk -> doc) --
+
+/// How long to wait after the latest event for a path before processing it.
+/// Sized to absorb editor save patterns: vim/VS Code atomic rename takes
+/// <10ms, but truncate+write editors and slow saves can stretch out further.
+const FS_DEBOUNCE: Duration = Duration::from_millis(150);
+
+async fn debounced_fs_loop(
+    inner: Arc<VaultInner>,
+    binding: Arc<Binding>,
+    mut rx: mpsc::UnboundedReceiver<FsEvent>,
+) {
+    use std::path::PathBuf;
+    use tokio::time::Instant;
+
+    let mut pending: HashMap<PathBuf, (FsEvent, Instant)> = HashMap::new();
+
+    loop {
+        let now = Instant::now();
+        // Wait until either a new event arrives or the soonest pending
+        // deadline expires. If nothing is pending, sleep for an effectively
+        // unbounded window (the recv() arm will wake us).
+        let next_wait = pending
+            .values()
+            .map(|(_, t)| t.saturating_duration_since(now))
+            .min()
+            .unwrap_or(Duration::from_secs(3600));
+
+        tokio::select! {
+            biased;
+            ev = rx.recv() => {
+                match ev {
+                    Some(ev) => {
+                        let path = match &ev {
+                            FsEvent::Touched(p) | FsEvent::Removed(p) => p.clone(),
+                            FsEvent::Renamed { to, .. } => to.clone(),
+                        };
+                        // Newest event wins, deadline reset.
+                        pending.insert(path, (ev, Instant::now() + FS_DEBOUNCE));
+                    }
+                    None => {
+                        // Channel closed; flush remaining and exit.
+                        flush_expired(&inner, &binding, &mut pending, true).await;
+                        return;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(next_wait) => {
+                flush_expired(&inner, &binding, &mut pending, false).await;
+            }
+        }
+    }
+}
+
+async fn flush_expired(
+    inner: &Arc<VaultInner>,
+    binding: &Arc<Binding>,
+    pending: &mut HashMap<std::path::PathBuf, (FsEvent, tokio::time::Instant)>,
+    force_all: bool,
+) {
+    let now = tokio::time::Instant::now();
+    let expired: Vec<std::path::PathBuf> = pending
+        .iter()
+        .filter(|(_, (_, t))| force_all || *t <= now)
+        .map(|(p, _)| p.clone())
+        .collect();
+    for path in expired {
+        if let Some((ev, _)) = pending.remove(&path) {
+            if let Err(e) = crate::fs::ingest::handle_fs_event(inner, binding, ev).await {
+                warn!(error=%e, "fs event handler");
+            }
+        }
+    }
+}
+
 // -- materialization (doc -> disk) --
 
 async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> Result<()> {
@@ -638,11 +711,28 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
 
     // Snapshot of what we currently believe is on disk.
     let existing: HashMap<String, String> = binding.materialized.lock().await.clone();
+    let last_ingested: HashMap<String, String> =
+        binding.last_ingested.lock().await.clone();
 
     // Removals: anything we previously wrote but is no longer in `live`.
     for path in existing.keys() {
         if !live.contains_key(path) {
             let abs = binding.vault_path_to_fs_path(path);
+            // Before removing, check if disk has user-edited content not yet
+            // ingested. If so, defer this round so the user's save isn't lost.
+            let disk_hash = match binding.adapter().read(&abs).await {
+                Ok(b) => Some(content_hash(&b)),
+                Err(_) => None,
+            };
+            if let Some(d) = &disk_hash {
+                if !is_safe_to_overwrite(d, existing.get(path), last_ingested.get(path)) {
+                    tracing::debug!(
+                        path,
+                        "materialize: deferring delete — disk has uncommitted local edits"
+                    );
+                    continue;
+                }
+            }
             if let Err(e) = binding.adapter().delete(&abs).await {
                 warn!(path, error=%e, "delete from disk");
             } else {
@@ -665,6 +755,33 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
                     continue;
                 }
                 let abs = binding.vault_path_to_fs_path(path);
+
+                // Read current disk state. If disk has user-edited content we
+                // haven't ingested yet, skip this round — overwriting would
+                // silently drop the user's save.
+                let disk_hash = match binding.adapter().read(&abs).await {
+                    Ok(b) => Some(content_hash(&b)),
+                    Err(_) => None,
+                };
+                if let Some(d) = &disk_hash {
+                    if d.as_str() == target_hash.as_str() {
+                        // Disk already matches doc; no write needed.
+                        binding
+                            .materialized
+                            .lock()
+                            .await
+                            .insert(path.clone(), target_hash);
+                        continue;
+                    }
+                    if !is_safe_to_overwrite(d, existing.get(path), last_ingested.get(path)) {
+                        tracing::debug!(
+                            path,
+                            "materialize: deferring write — disk has uncommitted local edits"
+                        );
+                        continue;
+                    }
+                }
+
                 {
                     let mut dirty = binding.dirty.lock().await;
                     dirty.mark(path, &target_hash);
@@ -690,6 +807,27 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
                         continue;
                     }
                     let abs = binding.vault_path_to_fs_path(path);
+                    let disk_hash = match binding.adapter().read(&abs).await {
+                        Ok(b) => Some(content_hash(&b)),
+                        Err(_) => None,
+                    };
+                    if let Some(d) = &disk_hash {
+                        if d.as_str() == h.as_str() {
+                            binding
+                                .materialized
+                                .lock()
+                                .await
+                                .insert(path.clone(), h.clone());
+                            continue;
+                        }
+                        if !is_safe_to_overwrite(d, existing.get(path), last_ingested.get(path)) {
+                            tracing::debug!(
+                                path,
+                                "materialize: deferring attachment write — disk has uncommitted local edits"
+                            );
+                            continue;
+                        }
+                    }
                     {
                         let mut dirty = binding.dirty.lock().await;
                         dirty.mark(path, h);
@@ -708,10 +846,30 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         }
     }
 
-    // Drop entries from `materialized` that we removed.
-    let mut mat = binding.materialized.lock().await;
-    mat.retain(|p, _| live.contains_key(p));
+    // Drop entries from bookkeeping for files no longer live.
+    binding
+        .materialized
+        .lock()
+        .await
+        .retain(|p, _| live.contains_key(p));
+    binding
+        .last_ingested
+        .lock()
+        .await
+        .retain(|p, _| live.contains_key(p));
     Ok(())
+}
+
+/// Disk content is safe to overwrite if it matches what we last materialized
+/// (no local edit has happened) or what we last ingested (the local edit is
+/// already captured by the doc).
+fn is_safe_to_overwrite(
+    disk_hash: &str,
+    last_materialized: Option<&String>,
+    last_ingested: Option<&String>,
+) -> bool {
+    last_materialized.map(|s| s.as_str()) == Some(disk_hash)
+        || last_ingested.map(|s| s.as_str()) == Some(disk_hash)
 }
 
 /// Helper for tests: peek live file paths.

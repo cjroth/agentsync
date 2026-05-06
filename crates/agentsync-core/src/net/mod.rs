@@ -3,5 +3,5 @@ pub mod client;
 pub mod server;
 
 pub use protocol::*;
-pub use client::ClientConn;
+pub use client::{discover_vault_id, ClientConn};
 pub use server::Server;

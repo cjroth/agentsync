@@ -5,9 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 agentsync-core = { path = "../../crates/agentsync-core" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["full", "process"] }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -26,3 +29,15 @@ path = "tests/crash_recovery.rs"
 [[test]]
 name = "extension_filter"
 path = "tests/extension_filter.rs"
+
+[[test]]
+name = "cli_subprocess"
+path = "tests/cli_subprocess.rs"
+
+[[test]]
+name = "data_loss_regressions"
+path = "tests/data_loss_regressions.rs"
+
+[[test]]
+name = "vault_id_discovery"
+path = "tests/vault_id_discovery.rs"

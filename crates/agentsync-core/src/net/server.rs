@@ -86,12 +86,16 @@ async fn handle_peer(
         } => (vid, auth_token, op),
         _ => return Err(Error::Protocol("first frame must be hello".into())),
     };
-    if their_vault != vault_id {
-        let err = Frame::Error {
-            message: format!("vault mismatch: expected {}", vault_id),
-        };
-        let _ = writer.send(Message::binary(err.encode()?)).await;
-        return Err(Error::Auth("vault id mismatch".into()));
+    // If the client volunteered a vault_id, it must match. If they didn't
+    // (fresh-clone path), we'll just tell them what ours is in HelloAck.
+    if let Some(vid) = &their_vault {
+        if vid != &vault_id {
+            let err = Frame::Error {
+                message: format!("vault mismatch: expected {}", vault_id),
+            };
+            let _ = writer.send(Message::binary(err.encode()?)).await;
+            return Err(Error::Auth("vault id mismatch".into()));
+        }
     }
     if !verify_auth_token(&vault_key, &their_token) {
         let err = Frame::Error {
