@@ -36,16 +36,48 @@ pub enum Command {
     Compact(CompactArgs),
     /// Manage vault keys.
     Key(KeyArgs),
+    /// Manage the pinned hub identity (`hub_pubkey`).
+    Hub(HubArgs),
     /// Print version.
     Version,
+}
+
+#[derive(Debug, Args)]
+pub struct HubArgs {
+    #[command(subcommand)]
+    pub op: HubOp,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HubOp {
+    /// Pin (or replace) the hub identity used for this vault.
+    Trust {
+        /// Pubkey in `ssh-ed25519 <base64>` form.
+        pubkey: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Clear the pinned hub identity. Next connect will trust whatever the
+    /// hub presents.
+    Forget {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show the currently pinned hub identity.
+    Show {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
     #[arg(long)]
     pub rendezvous: Option<String>,
+    /// Override the identity-secret path. Defaults to `.agentsync/identity`
+    /// (per-vault). Pass an absolute path to share an identity across vaults.
     #[arg(long)]
-    pub key_source: Option<String>,
+    pub identity: Option<PathBuf>,
     #[arg(long, default_value = ".")]
     pub path: PathBuf,
 }
@@ -63,6 +95,16 @@ pub struct WatchArgs {
     /// Don't connect to any rendezvous.
     #[arg(long)]
     pub offline: bool,
+    /// Override the ssh-agent socket path. Falls back to
+    /// `[identity] agent_socket` and then `$SSH_AUTH_SOCK`. Only used when
+    /// the identity backend is `agent`.
+    #[arg(long)]
+    pub identity_agent: Option<PathBuf>,
+    /// Select an ssh-agent identity by pubkey (in `ssh-ed25519 <base64>`
+    /// form, or path to a `.pub` file). Setting this switches the identity
+    /// backend to `agent`.
+    #[arg(long)]
+    pub identity_agent_pubkey: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -72,14 +114,19 @@ pub struct CloneArgs {
     /// Rendezvous WebSocket URL (e.g. ws://host:port).
     #[arg(long)]
     pub rendezvous: String,
-    /// Vault key — the base64 `vault_key` value printed by `agentsync init`
-    /// (not the `vault_id` UUID). Omit to read from $AGENTSYNC_KEY.
+    /// Path for the local identity secret. Defaults to
+    /// `<local_path>/.agentsync/identity`. If the file already exists, it's
+    /// reused; otherwise a fresh ed25519 keypair is generated.
     #[arg(long)]
-    pub key: Option<String>,
+    pub identity: Option<PathBuf>,
     /// Optional vault id. If omitted, discovered from the server during
     /// the handshake — typo-safety for users who already know it.
     #[arg(long)]
     pub vault_id: Option<String>,
+    /// Pre-pin the hub's identity pubkey, skipping the interactive trust
+    /// prompt. Suitable for CI / scripted setups.
+    #[arg(long)]
+    pub accept_hub_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -153,15 +200,18 @@ pub struct KeyArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum KeyOp {
-    /// Generate a fresh vault key (does not persist anywhere).
-    Generate,
-    /// Show the key configured for this vault.
-    Show {
+    /// Generate a fresh ed25519 identity for this vault. Refuses to overwrite
+    /// an existing identity file.
+    Generate {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Override the identity-secret path (default: `.agentsync/identity`).
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
-    /// Persist the current vault key to a keyring/file.
-    Store {
+    /// Print the local pubkey in `ssh-ed25519 ...` format, suitable for
+    /// pasting into someone else's peers.md.
+    Show {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -179,6 +229,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "diff",
     "compact",
     "key",
+    "hub",
     "version",
     "help",
 ];

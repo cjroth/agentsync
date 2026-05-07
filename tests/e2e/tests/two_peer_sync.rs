@@ -2,7 +2,8 @@
 //! Verifies that file writes propagate, deletes propagate, and concurrent
 //! edits to the same file converge.
 
-use agentsync_core::{BindOptions, CreateOptions, OpenOptions, Vault};
+use agentsync_core::{BindOptions, CreateOptions, Identity, OpenOptions, Vault};
+use agentsync_e2e::authorize_in_process;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -32,12 +33,11 @@ async fn one_writer_one_reader_propagates() {
         .with_env_filter("agentsync_core=trace,warn")
         .try_init();
 
-    // Server peer.
     let server_dir = tempdir().unwrap();
     let server_storage = server_dir.path().join(".agentsync");
     let (mut server, created) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: server_storage.clone(),
     })
     .await
@@ -47,15 +47,18 @@ async fn one_writer_one_reader_propagates() {
         .await
         .unwrap();
     let bound = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let url = format!("ws://{}", bound);
+    let url = format!("wss://{}", bound);
 
-    // Client peer.
+    let client_identity = Identity::generate();
+    authorize_in_process(&server, "client", &client_identity.pubkey()).await;
+
     let client_dir = tempdir().unwrap();
     let mut client = Vault::open(OpenOptions {
         rendezvous_url: Some(url.clone()),
         vault_id: created.vault_id.clone(),
-        vault_key: created.vault_key,
+        identity: client_identity,
         storage_path: client_dir.path().join(".agentsync"),
+        hub_pubkey: None,
     })
     .await
     .unwrap();
@@ -65,7 +68,6 @@ async fn one_writer_one_reader_propagates() {
         .unwrap();
     client.connect().await.unwrap();
 
-    // Write on server, expect client to see it.
     server
         .write_text_file("hello.md", "hello from server")
         .await
@@ -84,7 +86,6 @@ async fn one_writer_one_reader_propagates() {
     .await;
     assert!(ok, "client never observed the file");
 
-    // Write on client, expect server to see it.
     client
         .write_text_file("notes/from-client.md", "ack")
         .await
@@ -102,7 +103,6 @@ async fn one_writer_one_reader_propagates() {
     .await;
     assert!(ok, "server never observed client's file");
 
-    // Delete on server, expect client to see deletion.
     server.delete_file("hello.md").await.unwrap();
     let ok = wait_until(Duration::from_secs(5), || {
         let p = client_dir.path().join("hello.md");
@@ -122,7 +122,7 @@ async fn concurrent_edits_converge() {
     let server_dir = tempdir().unwrap();
     let (mut server, created) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: server_dir.path().join(".agentsync"),
     })
     .await
@@ -132,9 +132,14 @@ async fn concurrent_edits_converge() {
         .await
         .unwrap();
     let bound = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let url = format!("ws://{}", bound);
+    let url = format!("wss://{}", bound);
 
-    let make_client = |idx: u32| {
+    let id1 = Identity::generate();
+    let id2 = Identity::generate();
+    authorize_in_process(&server, "c1", &id1.pubkey()).await;
+    authorize_in_process(&server, "c2", &id2.pubkey()).await;
+
+    let make_client = |idx: u32, identity: Identity| {
         let url = url.clone();
         let vault_id = created.vault_id.clone();
         async move {
@@ -142,8 +147,9 @@ async fn concurrent_edits_converge() {
             let mut v = Vault::open(OpenOptions {
                 rendezvous_url: Some(url),
                 vault_id,
-                vault_key: created.vault_key,
+                identity,
                 storage_path: dir.path().join(".agentsync"),
+                hub_pubkey: None,
             })
             .await
             .unwrap();
@@ -156,15 +162,13 @@ async fn concurrent_edits_converge() {
         }
     };
 
-    let (v1, _d1, _) = make_client(1).await;
-    let (v2, _d2, _) = make_client(2).await;
+    let (v1, _d1, _) = make_client(1, id1).await;
+    let (v2, _d2, _) = make_client(2, id2).await;
 
-    // Both clients write to same file with different content.
     let f1 = v1.write_text_file("collab.md", "edit-from-1");
     let f2 = v2.write_text_file("collab.md", "edit-from-2");
     let _ = tokio::join!(f1, f2);
 
-    // Wait for convergence on the server's view.
     let mut converged = false;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
@@ -180,12 +184,14 @@ async fn concurrent_edits_converge() {
     assert!(converged, "peers did not converge on collab.md");
 }
 
+/// A peer whose pubkey is *not* in peers.md must be rejected at handshake
+/// time — the listener closes the connection before any sync flows.
 #[tokio::test]
-async fn wrong_key_is_rejected() {
+async fn unauthorized_peer_is_rejected() {
     let server_dir = tempdir().unwrap();
     let (mut server, created) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: server_dir.path().join(".agentsync"),
     })
     .await
@@ -195,17 +201,23 @@ async fn wrong_key_is_rejected() {
         .await
         .unwrap();
     let bound = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let url = format!("ws://{}", bound);
+    let url = format!("wss://{}", bound);
+
+    let intruder = Identity::generate();
 
     let client_dir = tempdir().unwrap();
     let mut client = Vault::open(OpenOptions {
         rendezvous_url: Some(url),
         vault_id: created.vault_id.clone(),
-        vault_key: [0u8; 32], // wrong key
+        identity: intruder,
         storage_path: client_dir.path().join(".agentsync"),
+        hub_pubkey: None,
     })
     .await
     .unwrap();
     let res = client.connect().await;
-    assert!(res.is_err(), "client with wrong key should be rejected");
+    assert!(
+        res.is_err(),
+        "client with unauthorized identity should be rejected"
+    );
 }

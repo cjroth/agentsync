@@ -48,12 +48,13 @@ async fn open(path: &std::path::Path) -> Result<Vault> {
     let path = path.canonicalize().unwrap_or(path.to_path_buf());
     let cfg = require_config(&path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
-    let key = config::resolve_key(&cfg, None)?;
+    let identity = config::resolve_identity(&path, &cfg)?;
     Ok(Vault::open(OpenOptions {
         rendezvous_url: cfg.vault.rendezvous_url.clone(),
         vault_id,
-        vault_key: key,
+        identity,
         storage_path: path.join(".agentsync"),
+        hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
     })
     .await?)
 }

@@ -1,32 +1,50 @@
 use crate::cli::{KeyArgs, KeyOp};
-use crate::commands::require_config;
-use crate::config;
-use agentsync_core::{encode_key, generate_vault_key};
-use anyhow::Result;
+use crate::config::{identity_path, read_or_default, write, ConfigFile, IdentitySection};
+use agentsync_core::Identity;
+use anyhow::{Context, Result};
 
 pub async fn run(args: KeyArgs) -> Result<()> {
     match args.op {
-        KeyOp::Generate => {
-            let k = generate_vault_key();
-            println!("{}", encode_key(&k));
+        KeyOp::Generate { path, identity } => {
+            let path = path.canonicalize().unwrap_or(path);
+            let mut cfg = read_or_default(&path)?;
+            if let Some(p) = identity {
+                cfg.identity.path = Some(p.to_string_lossy().into_owned());
+            }
+            let id_path = identity_path(&path, &cfg);
+            if id_path.exists() {
+                anyhow::bail!(
+                    "identity file already exists at {}; refusing to overwrite",
+                    id_path.display()
+                );
+            }
+            let id = Identity::generate();
+            id.save_to_file(&id_path).map_err(|e| anyhow::anyhow!(e))?;
+            // Persist the identity-path config if a non-default was passed.
+            if cfg.identity.path.is_some() {
+                if cfg.identity.agent_socket.is_none() && cfg.identity.agent_pubkey.is_none() {
+                    cfg.identity = IdentitySection {
+                        path: cfg.identity.path,
+                        ..Default::default()
+                    };
+                }
+                let _ = write(&path, &cfg);
+            }
+            println!("{}", id.pubkey().to_ssh_string());
+            eprintln!("identity written to {}", id_path.display());
         }
         KeyOp::Show { path } => {
             let path = path.canonicalize().unwrap_or(path);
-            let cfg = require_config(&path)?;
-            let key = config::resolve_key(&cfg, None)?;
-            println!("{}", encode_key(&key));
-        }
-        KeyOp::Store { path } => {
-            let path = path.canonicalize().unwrap_or(path);
-            let cfg = require_config(&path)?;
-            let key = config::resolve_key(&cfg, None)?;
-            // Persist into config.toml as an inline file source. (Keyring
-            // backend is out of scope for v1.)
-            let mut new_cfg = cfg.clone();
-            new_cfg.key.source = Some("file".into());
-            new_cfg.key.key_b64 = Some(encode_key(&key));
-            config::write(&path, &new_cfg)?;
-            println!("key stored in {}", config::config_path(&path).display());
+            let cfg = read_or_default(&path).unwrap_or_else(|_| ConfigFile::default());
+            // Agent-backed identity: print the configured agent_pubkey.
+            if let Some(s) = cfg.identity.agent_pubkey.as_deref() {
+                println!("{}", s.trim());
+            } else {
+                let id_path = identity_path(&path, &cfg);
+                let id = Identity::load_from_file(&id_path)
+                    .with_context(|| format!("load identity from {}", id_path.display()))?;
+                println!("{}", id.pubkey().to_ssh_string());
+            }
         }
     }
     Ok(())

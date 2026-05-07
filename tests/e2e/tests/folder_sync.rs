@@ -2,7 +2,8 @@
 //! deletion, and `rm -rf` on a populated tree all need to propagate between
 //! peers — previously only file-level events did.
 
-use agentsync_core::{BindOptions, CreateOptions, OpenOptions, Vault};
+use agentsync_core::{BindOptions, CreateOptions, Identity, OpenOptions, Vault};
+use agentsync_e2e::authorize_in_process;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -33,7 +34,7 @@ async fn make_pair() -> (Vault, tempfile::TempDir, Vault, tempfile::TempDir) {
     let server_dir = tempdir().unwrap();
     let (mut server, created) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: server_dir.path().join(".agentsync"),
     })
     .await
@@ -46,14 +47,18 @@ async fn make_pair() -> (Vault, tempfile::TempDir, Vault, tempfile::TempDir) {
         .listen("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    let url = format!("ws://{}", bound);
+    let url = format!("wss://{}", bound);
+
+    let client_identity = Identity::generate();
+    authorize_in_process(&server, "client", &client_identity.pubkey()).await;
 
     let client_dir = tempdir().unwrap();
     let mut client = Vault::open(OpenOptions {
         rendezvous_url: Some(url),
         vault_id: created.vault_id.clone(),
-        vault_key: created.vault_key,
+        identity: client_identity,
         storage_path: client_dir.path().join(".agentsync"),
+        hub_pubkey: None,
     })
     .await
     .unwrap();
@@ -96,7 +101,7 @@ async fn empty_folder_create_propagates() {
 
 #[tokio::test]
 async fn empty_folder_delete_propagates() {
-    let (server, server_dir, client, client_dir) = make_pair().await;
+    let (_server, server_dir, client, client_dir) = make_pair().await;
 
     // Create on server, wait for client to observe it, then delete on
     // server and assert client removes it too.

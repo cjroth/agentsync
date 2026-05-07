@@ -11,21 +11,41 @@ pub enum HelloOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum Frame {
-    /// Client → server handshake. `vault_id` is optional: a fresh client that
-    /// only has a rendezvous URL + key can omit it, and the server's HelloAck
-    /// response carries the vault_id back.
-    #[serde(rename = "hello")]
-    Hello {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        vault_id: Option<String>,
+    /// Hub → peer, first message in the handshake. Carries the vault id (so
+    /// fresh-clone peers can discover it), the hub's identity pubkey, the
+    /// hub-side nonce, and — in Phase 2+ — the SHA-256 fingerprint of the
+    /// hub's TLS cert (empty in Phase 1).
+    #[serde(rename = "hello_hub")]
+    HelloHub {
+        vault_id: String,
         #[serde(with = "serde_bytes")]
-        auth_token: Vec<u8>,
+        hub_identity_pubkey: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        hub_nonce: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        tls_cert_fingerprint: Vec<u8>,
+    },
+    /// Peer → hub, second handshake message.
+    #[serde(rename = "hello_peer")]
+    HelloPeer {
+        #[serde(with = "serde_bytes")]
+        peer_identity_pubkey: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        peer_nonce: Vec<u8>,
         op: HelloOp,
     },
-    /// Server → client acknowledgement. Always includes the server's vault_id
-    /// so a client connecting without one can persist it locally.
-    #[serde(rename = "hello_ack")]
-    HelloAck { vault_id: String },
+    /// Hub → peer, third handshake message: signature over the transcript.
+    #[serde(rename = "proof_hub")]
+    ProofHub {
+        #[serde(with = "serde_bytes")]
+        sig: Vec<u8>,
+    },
+    /// Peer → hub, fourth handshake message: signature over the transcript.
+    #[serde(rename = "proof_peer")]
+    ProofPeer {
+        #[serde(with = "serde_bytes")]
+        sig: Vec<u8>,
+    },
     /// Opaque Automerge sync message.
     #[serde(rename = "sync")]
     Sync {

@@ -1,53 +1,176 @@
-use crate::auth::{derive_auth_token, VaultKey};
+use crate::auth::{build_transcript, random_nonce, NONCE_LEN};
 use crate::error::{Error, Result};
+use crate::identity::{Identity, Pubkey};
 use crate::net::protocol::{Frame, HelloOp};
+use crate::tls::{cert_fingerprint, client_config_accept_any};
 use crate::vault::SyncHandle;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use rustls_pki_types::ServerName;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
+use tokio_tungstenite::client_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
 
-/// One-shot connect to ask the server what its vault_id is. Used by clients
-/// that only have a rendezvous URL + key and want to discover the vault to
-/// join. The returned `vault_id` should be persisted locally so subsequent
-/// runs can validate the connection.
-pub async fn discover_vault_id(url: &str, vault_key: VaultKey) -> Result<String> {
-    let (ws, _) = connect_async(url).await?;
+type WsStream = WebSocketStream<TlsStream<TcpStream>>;
+
+/// Establish a TCP+TLS connection to `url` and return the wrapped TlsStream
+/// plus the SHA-256 of the cert the server presented.
+async fn tls_connect(url: &str) -> Result<(TlsStream<TcpStream>, [u8; 32], String)> {
+    let parsed = url::Url::parse(url).map_err(|e| Error::Network(format!("parse url: {}", e)))?;
+    if parsed.scheme() != "wss" && parsed.scheme() != "ws" {
+        return Err(Error::Network(format!(
+            "unsupported scheme {:?} (expected wss://)",
+            parsed.scheme()
+        )));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| Error::Network("url missing host".into()))?
+        .to_string();
+    let port = parsed.port().unwrap_or(443);
+    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+
+    let connector = TlsConnector::from(client_config_accept_any());
+    // Trust comes from the application-layer signature, not from the TLS
+    // ServerName, so any name works here. Try IP first; fall back to DNS.
+    let server_name = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ServerName::IpAddress(ip.into()),
+        Err(_) => ServerName::try_from(host.clone())
+            .map_err(|e| Error::Network(format!("invalid server name: {}", e)))?,
+    };
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| Error::Network(format!("tls connect: {}", e)))?;
+    let (_io, conn) = tls.get_ref();
+    let peer_certs = conn
+        .peer_certificates()
+        .ok_or_else(|| Error::Network("server presented no certificate".into()))?;
+    let cert_der = peer_certs
+        .first()
+        .ok_or_else(|| Error::Network("empty server certificate chain".into()))?
+        .as_ref()
+        .to_vec();
+    let fp = cert_fingerprint(&cert_der);
+    info!(url, fp = ?hex::encode(fp), "tls handshake complete");
+    Ok((tls, fp, url.to_string()))
+}
+
+async fn open_websocket(url: &str) -> Result<(WsStream, [u8; 32])> {
+    let (tls, fp, _url) = tls_connect(url).await?;
+    let request = url
+        .into_client_request()
+        .map_err(|e| Error::Network(format!("build ws request: {}", e)))?;
+    let (ws, _) = client_async(request, tls)
+        .await
+        .map_err(|e| Error::WebSocket(e.to_string()))?;
+    Ok((ws, fp))
+}
+
+/// Probe a hub: do the full four-message handshake to learn the hub's
+/// vault_id and identity pubkey, then close.
+pub async fn discover_vault_id(url: &str, identity: &Identity) -> Result<String> {
+    let (vault_id, _hub_pubkey, _ws) = probe_handshake(url, identity).await?;
+    Ok(vault_id)
+}
+
+async fn probe_handshake(
+    url: &str,
+    identity: &Identity,
+) -> Result<(String, Pubkey, WsStream)> {
+    let (ws, cert_fp) = open_websocket(url).await?;
     let (mut writer, mut reader) = ws.split();
 
-    let hello = Frame::Hello {
-        vault_id: None,
-        auth_token: derive_auth_token(&vault_key).to_vec(),
+    let (vault_id, hub_pubkey, _) =
+        run_handshake(&mut writer, &mut reader, identity, cert_fp).await?;
+    let ws = writer.reunite(reader).map_err(|e| {
+        Error::Network(format!("reunite ws after handshake: {}", e))
+    })?;
+    Ok((vault_id, hub_pubkey, ws))
+}
+
+async fn run_handshake<S>(
+    writer: &mut SplitSink<WebSocketStream<S>, Message>,
+    reader: &mut SplitStream<WebSocketStream<S>>,
+    identity: &Identity,
+    expected_cert_fp: [u8; 32],
+) -> Result<(String, Pubkey, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let frame = read_one_frame(reader).await?;
+    let (vault_id, hub_pubkey_bytes, hub_nonce_bytes, advertised_fp) = match frame {
+        Frame::HelloHub {
+            vault_id,
+            hub_identity_pubkey,
+            hub_nonce,
+            tls_cert_fingerprint,
+        } => (vault_id, hub_identity_pubkey, hub_nonce, tls_cert_fingerprint),
+        Frame::Error { message } => return Err(Error::Auth(message)),
+        _ => return Err(Error::Protocol("expected HelloHub".into())),
+    };
+    let hub_pubkey = Pubkey::from_bytes(&hub_pubkey_bytes)?;
+    if hub_nonce_bytes.len() != NONCE_LEN {
+        return Err(Error::Protocol("hub nonce wrong length".into()));
+    }
+    let mut hub_nonce = [0u8; NONCE_LEN];
+    hub_nonce.copy_from_slice(&hub_nonce_bytes);
+
+    // Channel binding: the fingerprint advertised by the hub MUST match the
+    // one we observed at the TLS layer. A relayed MITM that re-encrypts to
+    // the real listener will trip this — its TLS cert is different from
+    // what the hub committed to in HelloHub.
+    if advertised_fp != expected_cert_fp.as_slice() {
+        return Err(Error::Auth(format!(
+            "tls cert fingerprint mismatch: advertised {} bytes, observed {}",
+            advertised_fp.len(),
+            expected_cert_fp.len()
+        )));
+    }
+
+    let peer_pubkey = identity.pubkey();
+    let peer_nonce = random_nonce();
+    let hello_peer = Frame::HelloPeer {
+        peer_identity_pubkey: peer_pubkey.as_bytes().to_vec(),
+        peer_nonce: peer_nonce.to_vec(),
         op: HelloOp::Join,
     };
-    writer.send(Message::binary(hello.encode()?)).await?;
+    writer.send(Message::binary(hello_peer.encode()?)).await?;
 
-    while let Some(msg) = reader.next().await {
-        let bytes = match msg {
-            Ok(Message::Binary(b)) => b,
-            Ok(Message::Close(_)) => break,
-            Ok(_) => continue,
-            Err(e) => return Err(Error::WebSocket(e.to_string())),
-        };
-        let frame = Frame::decode(&bytes)?;
-        match frame {
-            Frame::HelloAck { vault_id } => {
-                let _ = writer.send(Message::Close(None)).await;
-                let _ = writer.close().await;
-                return Ok(vault_id);
-            }
-            Frame::Error { message } => {
-                return Err(Error::Auth(message));
-            }
-            _ => continue,
-        }
+    let transcript = build_transcript(
+        &hub_nonce,
+        &peer_nonce,
+        &advertised_fp,
+        hub_pubkey.as_bytes(),
+        peer_pubkey.as_bytes(),
+    );
+    let frame = read_one_frame(reader).await?;
+    let hub_sig = match frame {
+        Frame::ProofHub { sig } => sig,
+        Frame::Error { message } => return Err(Error::Auth(message)),
+        _ => return Err(Error::Protocol("expected ProofHub".into())),
+    };
+    if !hub_pubkey.verify(&transcript, &hub_sig) {
+        return Err(Error::Auth("hub signature failed verification".into()));
     }
-    Err(Error::Network("no HelloAck received".into()))
+
+    let peer_sig = identity.sign(&transcript).await?;
+    let proof_peer = Frame::ProofPeer {
+        sig: peer_sig.to_vec(),
+    };
+    writer.send(Message::binary(proof_peer.encode()?)).await?;
+
+    Ok((vault_id, hub_pubkey, transcript))
 }
 
 pub struct ClientConn {
@@ -57,26 +180,17 @@ pub struct ClientConn {
     notif_task: Option<JoinHandle<()>>,
     sync_handle: Arc<dyn SyncHandle>,
     peer_id: u64,
-    /// Fired by the reader task when the websocket has closed for any reason.
+    pub vault_id: String,
+    pub hub_pubkey: Pubkey,
     closed_notify: Arc<Notify>,
-    /// Read by `wait_closed` to short-circuit when closure already fired —
-    /// `Notify::notify_waiters` only wakes already-registered waiters, so a
-    /// pure-Notify implementation would race against a fast-closing peer.
     is_closed: Arc<AtomicBool>,
 }
 
 impl ClientConn {
-    /// Resolves once the underlying websocket has closed (peer hangup, write
-    /// error, or network drop). Returns immediately if the connection is
-    /// already gone. Used by the reconnect supervisor to detect when to
-    /// retry.
     pub async fn wait_closed(&self) {
         self.closed_signal().wait().await;
     }
 
-    /// Detaches a closure-watcher that doesn't borrow the conn. Lets the
-    /// reconnect supervisor wait for closure without holding the
-    /// `Mutex<Option<ClientConn>>` lock that everyone else needs.
     pub fn closed_signal(&self) -> ClosedSignal {
         ClosedSignal {
             notify: self.closed_notify.clone(),
@@ -85,7 +199,6 @@ impl ClientConn {
     }
 }
 
-/// Detached closure watcher; see `ClientConn::closed_signal`.
 #[derive(Clone)]
 pub struct ClosedSignal {
     notify: Arc<Notify>,
@@ -105,9 +218,6 @@ impl ClosedSignal {
 }
 
 impl ClientConn {
-    /// Send a WebSocket Close frame to the peer and tear down the connection.
-    /// The writer task is awaited (with a short timeout) so the Close frame
-    /// actually goes out on the wire before the underlying socket closes.
     pub async fn close(mut self) {
         if let Some(tx) = self.close_tx.take() {
             let _ = tx.send(());
@@ -121,18 +231,12 @@ impl ClientConn {
         if let Some(h) = self.writer_task.take() {
             let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
         }
-        // Idempotent — the reader task may have already done this on a
-        // server-initiated close.
         self.sync_handle.unregister_peer(self.peer_id).await;
     }
 }
 
 impl Drop for ClientConn {
     fn drop(&mut self) {
-        // Best-effort: nudge the writer task so it has a chance to flush the
-        // Close frame before the runtime tears tasks down. Drop is sync so we
-        // can't await; callers who care about graceful close should call
-        // `close().await`.
         if let Some(tx) = self.close_tx.take() {
             let _ = tx.send(());
         }
@@ -148,58 +252,50 @@ impl Drop for ClientConn {
 impl ClientConn {
     pub async fn connect(
         url: &str,
-        vault_id: String,
-        vault_key: VaultKey,
+        expected_vault_id: Option<String>,
+        expected_hub_pubkey: Option<Pubkey>,
+        identity: Identity,
         sync_handle: Arc<dyn SyncHandle>,
     ) -> Result<Self> {
-        let (ws, _) = connect_async(url).await?;
+        let (ws, cert_fp) = open_websocket(url).await?;
         info!(url, "connected to rendezvous");
         let (mut writer, mut reader) = ws.split();
 
-        // HELLO
-        let hello = Frame::Hello {
-            vault_id: Some(vault_id.clone()),
-            auth_token: derive_auth_token(&vault_key).to_vec(),
-            op: HelloOp::Join,
-        };
-        writer.send(Message::binary(hello.encode()?)).await?;
+        let (vault_id, hub_pubkey, _) =
+            run_handshake(&mut writer, &mut reader, &identity, cert_fp).await?;
 
-        // Wait for HelloAck.
-        loop {
-            match reader.next().await {
-                Some(Ok(Message::Binary(b))) => {
-                    let frame = Frame::decode(&b)?;
-                    match frame {
-                        Frame::HelloAck { .. } => break,
-                        Frame::Error { message } => {
-                            return Err(Error::Auth(message));
-                        }
-                        other => {
-                            warn!(?other, "unexpected frame before hello_ack");
-                        }
-                    }
-                }
-                Some(Ok(Message::Close(_))) => {
-                    return Err(Error::Network("closed before hello_ack".into()));
-                }
-                Some(Ok(_)) => continue,
-                Some(Err(e)) => return Err(Error::WebSocket(e.to_string())),
-                None => return Err(Error::Network("stream ended before hello_ack".into())),
+        if let Some(expected) = &expected_vault_id {
+            if expected != &vault_id {
+                return Err(Error::Auth(format!(
+                    "vault_id mismatch: server reported {} but local config has {}",
+                    vault_id, expected
+                )));
             }
         }
 
-        // Channel for outbound frames.
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
-        let peer_id = sync_handle.register_peer(out_tx.clone()).await?;
+        if let Some(expected) = expected_hub_pubkey {
+            if expected != hub_pubkey {
+                return Err(Error::Auth(format!(
+                    "hub identity mismatch: pinned {} but hub presented {}.\n\
+                     Either the hub's identity key was rotated, or someone is \
+                     impersonating it. Run `agentsync hub trust {}` to accept the \
+                     new key, or `agentsync hub forget` to clear the pin.",
+                    expected.fingerprint_sha256(),
+                    hub_pubkey.fingerprint_sha256(),
+                    hub_pubkey.to_ssh_string()
+                )));
+            }
+        }
 
-        // Send the initial sync message right away.
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
+        let peer_id = sync_handle
+            .register_peer(out_tx.clone(), Some(hub_pubkey))
+            .await?;
+
         if let Some(msg) = sync_handle.generate_sync_message(peer_id).await? {
             let _ = out_tx.send(Frame::Sync { bytes: msg });
         }
 
-        // Writer task: pump frames out. Selects on a oneshot close signal so
-        // graceful disconnect can interrupt the loop and emit a Close frame
-        // before the underlying socket goes away.
         let (close_tx, mut close_rx) = oneshot::channel::<()>();
         let writer_task = tokio::spawn(async move {
             loop {
@@ -216,7 +312,6 @@ impl ClientConn {
                                 }
                             };
                             if writer.send(Message::binary(bytes)).await.is_err() {
-                                // Peer is gone — skip the Close attempt.
                                 return;
                             }
                         }
@@ -228,7 +323,6 @@ impl ClientConn {
             let _ = writer.close().await;
         });
 
-        // Reader task: process inbound frames.
         let sync_for_reader = sync_handle.clone();
         let out_for_reader = out_tx.clone();
         let closed_notify = Arc::new(Notify::new());
@@ -256,13 +350,10 @@ impl ClientConn {
                 handle_inbound(peer_id, frame, &sync_for_reader, &out_for_reader).await;
             }
             sync_for_reader.unregister_peer(peer_id).await;
-            // Fire the close signal AFTER unregistering so that anyone the
-            // supervisor wakes sees a fully cleaned-up state.
             reader_is_closed.store(true, Ordering::Release);
             reader_closed_notify.notify_waiters();
         });
 
-        // Doc-change notifier: when local doc changes, generate sync messages.
         let sync_for_notif = sync_handle.clone();
         let out_for_notif = out_tx.clone();
         let notif_task = tokio::spawn(async move {
@@ -293,6 +384,8 @@ impl ClientConn {
             notif_task: Some(notif_task),
             sync_handle,
             peer_id,
+            vault_id,
+            hub_pubkey,
             closed_notify,
             is_closed,
         })
@@ -334,11 +427,30 @@ pub(crate) async fn handle_inbound(
         }
         Frame::Pong { .. } => {}
         Frame::Error { message } => warn!(message, "peer error"),
-        Frame::Hello { .. } | Frame::HelloAck { .. } => {
-            debug!("ignoring late hello frame");
+        Frame::HelloHub { .. }
+        | Frame::HelloPeer { .. }
+        | Frame::ProofHub { .. }
+        | Frame::ProofPeer { .. } => {
+            debug!("ignoring late handshake frame");
         }
     }
 }
 
-#[allow(dead_code)]
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+async fn read_one_frame<S>(
+    reader: &mut SplitStream<WebSocketStream<S>>,
+) -> Result<Frame>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        match reader.next().await {
+            Some(Ok(Message::Binary(b))) => return Frame::decode(&b),
+            Some(Ok(Message::Close(_))) => {
+                return Err(Error::Network("connection closed mid-handshake".into()));
+            }
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => return Err(Error::WebSocket(e.to_string())),
+            None => return Err(Error::Network("stream ended mid-handshake".into())),
+        }
+    }
+}

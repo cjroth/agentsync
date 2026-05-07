@@ -1,12 +1,13 @@
-use crate::auth::{encode_key, generate_vault_key, VaultKey};
 use crate::doc::{content_hash, Doc, FileKind, FileMeta, Label};
 use crate::error::{Error, Result};
 use crate::fs::adapter::{FilesystemAdapter, FsEvent};
 use crate::fs::binding::{BindOptions, Binding};
 use crate::fs::node_adapter::NodeFsAdapter;
+use crate::identity::{Identity, Pubkey};
 use crate::net::client::ClientConn;
 use crate::net::protocol::Frame;
 use crate::net::server::Server;
+use crate::peers_md::{parse_peers_md, render_peers_md, AuthorizedPeer, PEERS_FILE};
 use crate::store::{BlobStore, DocStore, SnapshotIndex};
 use async_trait::async_trait;
 use automerge::sync::{self as amsync, SyncDoc};
@@ -28,14 +29,21 @@ pub type VaultId = String;
 pub struct OpenOptions {
     pub rendezvous_url: Option<String>,
     pub vault_id: VaultId,
-    pub vault_key: VaultKey,
+    pub identity: Identity,
     pub storage_path: PathBuf,
+    /// TOFU-pinned hub identity (Phase 4 of AUTH.md). When `Some`, every
+    /// outbound connect requires the hub's pubkey to match exactly. When
+    /// `None`, any hub identity is accepted; the caller is responsible for
+    /// running the trust prompt if interactive.
+    pub hub_pubkey: Option<Pubkey>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateOptions {
     pub rendezvous_url: Option<String>,
-    pub vault_key: Option<VaultKey>,
+    /// Optional pre-generated identity. When `None`, a fresh ed25519 keypair
+    /// is generated.
+    pub identity: Option<Identity>,
     pub storage_path: PathBuf,
 }
 
@@ -56,7 +64,7 @@ pub enum VaultEventKind {
 #[derive(Debug, Clone)]
 pub struct CreatedVault {
     pub vault_id: VaultId,
-    pub vault_key: VaultKey,
+    pub identity: Identity,
 }
 
 /// Owns one Automerge doc, the storage layout, and any active network sessions.
@@ -66,7 +74,7 @@ pub struct Vault {
 
 pub(crate) struct VaultInner {
     pub vault_id: VaultId,
-    pub vault_key: VaultKey,
+    pub identity: Identity,
     pub storage_path: PathBuf,
     pub doc: Mutex<Doc>,
     pub doc_store: DocStore,
@@ -85,28 +93,15 @@ pub(crate) struct VaultInner {
     // active outbound connection (if any)
     pub client: Mutex<Option<ClientConn>>,
     pub server: Mutex<Option<Server>>,
-    /// Background task that maintains the outbound connection: handles initial
-    /// connect with backoff and reconnects on disconnect. Spawned by
-    /// `Vault::connect_with_reconnect`. `None` if the vault was opened with
-    /// the one-shot `Vault::connect` instead, or if no outbound connection
-    /// has been requested.
     pub(crate) reconnect_supervisor: Mutex<Option<ReconnectSupervisor>>,
 
     pub config: VaultConfig,
 }
 
-/// Tunables for `Vault::connect_with_reconnect`. The defaults match the spec:
-/// 10 attempts, 500ms initial backoff, capped at 30s.
 #[derive(Debug, Clone)]
 pub struct ReconnectOptions {
-    /// Maximum number of consecutive failed connect attempts before the
-    /// supervisor gives up. Reset to zero on every successful connect, so
-    /// each fresh disconnect gets its own budget.
     pub max_attempts: u32,
-    /// Backoff before the second connect attempt. Doubles each subsequent
-    /// failure, capped at `max_backoff`.
     pub initial_backoff: Duration,
-    /// Upper bound on the per-attempt backoff.
     pub max_backoff: Duration,
 }
 
@@ -133,7 +128,6 @@ impl ReconnectSupervisor {
 }
 
 fn backoff_delay(initial: Duration, cap: Duration, attempt: u32) -> Duration {
-    // attempt is 1-based: first failure gets `initial`, then doubles.
     let exp = attempt.saturating_sub(1).min(20);
     let factor = 1u64 << exp;
     let millis = (initial.as_millis() as u64).saturating_mul(factor);
@@ -142,14 +136,10 @@ fn backoff_delay(initial: Duration, cap: Duration, attempt: u32) -> Duration {
 
 enum ConnectResult {
     Connected(ClientConn),
-    /// User called `disconnect()` while we were trying to connect.
     Shutdown,
-    /// Hit `max_attempts` without succeeding.
     GaveUp,
 }
 
-/// Runs the connect-with-backoff loop. Cooperatively cancellable via
-/// `shutdown_rx`.
 async fn connect_with_backoff(
     inner: &Arc<VaultInner>,
     url: &str,
@@ -161,8 +151,9 @@ async fn connect_with_backoff(
         attempt += 1;
         let result = ClientConn::connect(
             url,
-            inner.vault_id.clone(),
-            inner.vault_key,
+            Some(inner.vault_id.clone()),
+            inner.config.hub_pubkey,
+            inner.identity.clone(),
             Arc::new(VaultSyncHandle {
                 inner: inner.clone(),
             }) as Arc<dyn SyncHandle>,
@@ -209,6 +200,7 @@ async fn connect_with_backoff(
 #[derive(Debug, Clone)]
 pub struct VaultConfig {
     pub rendezvous_url: Option<String>,
+    pub hub_pubkey: Option<Pubkey>,
     pub save_interval: Duration,
     pub save_after_changes: u32,
 }
@@ -217,6 +209,7 @@ impl Default for VaultConfig {
     fn default() -> Self {
         Self {
             rendezvous_url: None,
+            hub_pubkey: None,
             save_interval: Duration::from_secs(1),
             save_after_changes: 100,
         }
@@ -226,10 +219,15 @@ impl Default for VaultConfig {
 pub struct PeerSlot {
     pub state: amsync::State,
     pub out: mpsc::UnboundedSender<Frame>,
+    /// Set during the handshake; used by the server's authorization enforcer
+    /// to find peers no longer in `peers.md`.
+    pub pubkey: Option<Pubkey>,
 }
 
 impl Vault {
-    /// Create a brand-new vault on disk. Generates vault_id and key if absent.
+    /// Create a brand-new vault on disk. Generates vault_id and identity if absent.
+    /// Also seeds `peers.md` with the creator's pubkey so they can connect to
+    /// their own listener immediately.
     pub async fn create(opts: CreateOptions) -> Result<(Self, CreatedVault)> {
         let storage = opts.storage_path.clone();
         tokio::fs::create_dir_all(&storage).await?;
@@ -240,7 +238,7 @@ impl Vault {
         blob_store.ensure_dirs().await?;
 
         let vault_id = Uuid::new_v4().to_string();
-        let vault_key = opts.vault_key.unwrap_or_else(generate_vault_key);
+        let identity = opts.identity.unwrap_or_else(Identity::generate);
 
         if doc_store.doc_exists().await {
             return Err(Error::AlreadyExists(format!(
@@ -249,11 +247,19 @@ impl Vault {
             )));
         }
         let mut doc = Doc::new(&vault_id)?;
+        // Seed peers.md so the creator's own pubkey is authorized — otherwise
+        // every later connection (including their own listener accepting their
+        // own client) would be rejected.
+        let seed = render_peers_md(&[AuthorizedPeer {
+            pubkey: identity.pubkey(),
+            label: "creator".into(),
+        }]);
+        doc.write_text_file(PEERS_FILE, &seed)?;
         doc_store.save(&mut doc).await?;
 
         let inner = Arc::new(VaultInner {
             vault_id: vault_id.clone(),
-            vault_key,
+            identity: identity.clone(),
             storage_path: storage,
             doc: Mutex::new(doc),
             doc_store,
@@ -280,7 +286,7 @@ impl Vault {
             v,
             CreatedVault {
                 vault_id,
-                vault_key,
+                identity,
             },
         ))
     }
@@ -306,7 +312,7 @@ impl Vault {
         }
         let inner = Arc::new(VaultInner {
             vault_id: opts.vault_id,
-            vault_key: opts.vault_key,
+            identity: opts.identity,
             storage_path: storage,
             doc: Mutex::new(doc),
             doc_store,
@@ -322,6 +328,7 @@ impl Vault {
             reconnect_supervisor: Mutex::new(None),
             config: VaultConfig {
                 rendezvous_url: opts.rendezvous_url,
+                hub_pubkey: opts.hub_pubkey,
                 ..Default::default()
             },
         });
@@ -336,12 +343,12 @@ impl Vault {
         &self.inner.vault_id
     }
 
-    pub fn key(&self) -> &VaultKey {
-        &self.inner.vault_key
+    pub fn identity(&self) -> &Identity {
+        &self.inner.identity
     }
 
-    pub fn key_b64(&self) -> String {
-        encode_key(&self.inner.vault_key)
+    pub fn pubkey(&self) -> Pubkey {
+        self.inner.identity.pubkey()
     }
 
     pub fn storage_path(&self) -> &Path {
@@ -352,13 +359,11 @@ impl Vault {
         self.inner.events.subscribe()
     }
 
-    /// Save the doc to disk now.
     pub async fn flush(&self) -> Result<()> {
         let mut doc = self.inner.doc.lock().await;
         self.inner.doc_store.save(&mut doc).await
     }
 
-    /// Background loop: periodically flush the doc.
     fn start_save_loop(&self) {
         let inner = self.inner.clone();
         let interval_dur = inner.config.save_interval;
@@ -504,7 +509,6 @@ impl Vault {
             doc.get_label_heads(name)?
         };
         self.restore_to_heads(&heads).await?;
-        // Materialize.
         if let Some(b) = self.binding_arc().await {
             self.materialize(&b).await?;
         }
@@ -547,8 +551,9 @@ impl Vault {
         };
         let conn = ClientConn::connect(
             &url,
-            self.inner.vault_id.clone(),
-            self.inner.vault_key,
+            Some(self.inner.vault_id.clone()),
+            self.inner.config.hub_pubkey,
+            self.inner.identity.clone(),
             Arc::new(VaultSyncHandle {
                 inner: self.inner.clone(),
             }) as Arc<dyn SyncHandle>,
@@ -561,14 +566,7 @@ impl Vault {
         Ok(())
     }
 
-    /// Drop the active outbound connection (if any). Sends a WebSocket Close
-    /// frame to the peer before tearing down the socket so the remote side
-    /// observes a clean shutdown rather than a TCP reset. Also stops any
-    /// running reconnect supervisor so it doesn't immediately re-establish
-    /// the connection.
     pub async fn disconnect(&mut self) {
-        // Stop the supervisor first; otherwise it could race with us and
-        // immediately reconnect after we tear the connection down.
         let supervisor = self.inner.reconnect_supervisor.lock().await.take();
         if let Some(s) = supervisor {
             s.shutdown().await;
@@ -582,19 +580,7 @@ impl Vault {
         });
     }
 
-    /// Spawn a supervisor task that maintains an outbound connection to the
-    /// configured rendezvous. The first connect is retried with exponential
-    /// backoff up to `opts.max_attempts` times before the supervisor gives
-    /// up. Once connected, every disconnect — peer hangup, network drop,
-    /// rendezvous restart — triggers another retry sequence with the same
-    /// budget.
-    ///
-    /// Returns immediately after spawning. `disconnect()` stops the
-    /// supervisor cleanly. If a supervisor is already running, it is
-    /// replaced.
     pub async fn connect_with_reconnect(&mut self, opts: ReconnectOptions) -> Result<()> {
-        // Stop any prior supervisor + connection so we don't end up with two
-        // racing client sessions sharing the same vault.
         self.disconnect().await;
 
         let url = match self.inner.config.rendezvous_url.clone() {
@@ -606,7 +592,6 @@ impl Vault {
         let inner = self.inner.clone();
         let handle = tokio::spawn(async move {
             'outer: loop {
-                // -- connect-with-backoff phase --
                 let conn = match connect_with_backoff(
                     &inner,
                     &url,
@@ -631,8 +616,6 @@ impl Vault {
                     kind: VaultEventKind::Connected,
                 });
 
-                // -- supervise phase: keep the conn alive until it dies or
-                //    the user calls disconnect() --
                 let closed = conn.closed_signal();
                 {
                     let mut slot = inner.client.lock().await;
@@ -644,7 +627,6 @@ impl Vault {
                         let _ = inner.events.send(VaultEvent {
                             kind: VaultEventKind::Disconnected,
                         });
-                        // Drop the dead conn so the next loop installs a fresh one.
                         let dead = inner.client.lock().await.take();
                         if let Some(c) = dead {
                             c.close().await;
@@ -652,7 +634,6 @@ impl Vault {
                         continue 'outer;
                     }
                     _ = &mut shutdown_rx => {
-                        // disconnect() is racing with us — let it take the conn.
                         return;
                     }
                 }
@@ -666,15 +647,20 @@ impl Vault {
         Ok(())
     }
 
-    /// Bind the active server (`agentsync --listen`) on `addr`.
+    /// Bind a listener with a self-signed TLS cert. The cert is auto-loaded
+    /// or generated under `<storage>/../.agentsync-server/`.
     pub async fn listen(&mut self, addr: SocketAddr) -> Result<SocketAddr> {
+        let tls_dir = crate::tls::tls_dir_for_storage(&self.inner.storage_path);
+        let (cert_der, key_der) = crate::tls::load_or_generate_self_signed(&tls_dir)?;
         let server = Server::bind(
             addr,
             self.inner.vault_id.clone(),
-            self.inner.vault_key,
+            self.inner.identity.clone(),
             Arc::new(VaultSyncHandle {
                 inner: self.inner.clone(),
             }) as Arc<dyn SyncHandle>,
+            cert_der,
+            key_der,
         )
         .await?;
         let bound = server.bound_addr;
@@ -682,9 +668,6 @@ impl Vault {
         Ok(bound)
     }
 
-    /// Stop accepting peers and gracefully close every active connection.
-    /// Each peer's writer sends a Close frame so the remote side observes a
-    /// clean shutdown.
     pub async fn unlisten(&mut self) {
         let server = self.inner.server.lock().await.take();
         if let Some(s) = server {
@@ -703,29 +686,19 @@ impl Vault {
         path: &Path,
         opts: BindOptions,
     ) -> Result<Arc<Binding>> {
-        // Initial scan: ingest existing files into the doc.
         let adapter: Arc<dyn FilesystemAdapter> = Arc::new(NodeFsAdapter::new());
         let mut binding = Binding::new(path, opts.clone(), adapter.clone());
 
-        // Set up watcher channel.
         let (tx, rx) = mpsc::unbounded_channel::<FsEvent>();
         let watcher = adapter.watch(path, tx)?;
         binding.set_watcher(watcher);
         let binding = Arc::new(binding);
         *self.inner.binding.lock().await = Some(binding.clone());
 
-        // Initial scan & ingest.
         crate::fs::ingest::initial_scan(&self.inner, &binding).await?;
 
-        // Initial materialization for any files already in the doc that are
-        // missing from disk (e.g. clone case).
         self.materialize(&binding).await?;
 
-        // Inbound watcher loop with per-path debouncing. Editors that save via
-        // truncate+write produce a transient empty state; without debouncing
-        // we'd ingest empty content into the doc and propagate it to peers
-        // before the second write lands. Coalescing fs events for ~150ms means
-        // we only ever see the final post-save state.
         {
             let inner = self.inner.clone();
             let binding = binding.clone();
@@ -734,9 +707,6 @@ impl Vault {
             });
         }
 
-        // Doc-change → materialize loop. Uses both a Notify and a short
-        // periodic poll, so that a notification dropped while the task is
-        // not parked still gets caught on the next tick.
         {
             let inner = self.inner.clone();
             let binding = binding.clone();
@@ -763,9 +733,6 @@ impl Vault {
         materialize_inner(&self.inner, binding).await
     }
 
-    /// Save and gracefully shut down. Tears down any active outbound or
-    /// inbound websocket connections with proper Close frames before
-    /// flushing the doc to disk.
     pub async fn close(mut self) -> Result<()> {
         self.disconnect().await;
         self.unlisten().await;
@@ -773,23 +740,45 @@ impl Vault {
         Ok(())
     }
 
-    /// Number of currently-registered peer slots (one per active connection).
-    /// Test helper; production code should subscribe to `VaultEvent` instead.
     pub async fn peer_count(&self) -> usize {
         self.inner.peers.lock().await.len()
     }
+
+    /// Read & parse `peers.md` from the synced doc. Empty list if the file is
+    /// missing or unparseable.
+    pub async fn authorized_pubkeys(&self) -> Vec<Pubkey> {
+        let mut doc = self.inner.doc.lock().await;
+        let content = match doc.read_file(PEERS_FILE) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        parse_peers_md(&content)
+            .into_iter()
+            .map(|p| p.pubkey)
+            .collect()
+    }
 }
 
-/// Bridge between the network layer and the Vault. Implemented by `VaultSyncHandle`.
 #[async_trait]
 pub trait SyncHandle: Send + Sync {
-    async fn register_peer(&self, out: mpsc::UnboundedSender<Frame>) -> Result<u64>;
+    async fn register_peer(
+        &self,
+        out: mpsc::UnboundedSender<Frame>,
+        pubkey: Option<Pubkey>,
+    ) -> Result<u64>;
     async fn unregister_peer(&self, peer_id: u64);
     async fn generate_sync_message(&self, peer_id: u64) -> Result<Option<Vec<u8>>>;
     async fn receive_sync_message(&self, peer_id: u64, bytes: &[u8]) -> Result<()>;
     async fn read_blob(&self, hash: &str) -> Result<Vec<u8>>;
     async fn write_blob(&self, hash: &str, bytes: &[u8]) -> Result<()>;
     async fn wait_doc_changed(&self);
+    /// Latest list of authorized peer pubkeys, as parsed from `peers.md` in
+    /// the synced doc.
+    async fn authorized_pubkeys(&self) -> Vec<Pubkey>;
+    /// Drop the outbound channel for any connected peer whose pubkey is not
+    /// in `authorized`. The peer's writer task observes the channel close and
+    /// shuts down the websocket gracefully.
+    async fn disconnect_unauthorized_peers(&self, authorized: &[Pubkey]);
 }
 
 pub(crate) struct VaultSyncHandle {
@@ -798,13 +787,18 @@ pub(crate) struct VaultSyncHandle {
 
 #[async_trait]
 impl SyncHandle for VaultSyncHandle {
-    async fn register_peer(&self, out: mpsc::UnboundedSender<Frame>) -> Result<u64> {
+    async fn register_peer(
+        &self,
+        out: mpsc::UnboundedSender<Frame>,
+        pubkey: Option<Pubkey>,
+    ) -> Result<u64> {
         let id = self.inner.next_peer_id.fetch_add(1, Ordering::SeqCst);
         self.inner.peers.lock().await.insert(
             id,
             PeerSlot {
                 state: amsync::State::new(),
                 out,
+                pubkey,
             },
         );
         debug!(peer_id = id, "peer registered");
@@ -862,13 +856,37 @@ impl SyncHandle for VaultSyncHandle {
     async fn wait_doc_changed(&self) {
         self.inner.doc_changed.notified().await;
     }
+    async fn authorized_pubkeys(&self) -> Vec<Pubkey> {
+        let mut doc = self.inner.doc.lock().await;
+        let content = match doc.read_file(PEERS_FILE) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        parse_peers_md(&content)
+            .into_iter()
+            .map(|p| p.pubkey)
+            .collect()
+    }
+    async fn disconnect_unauthorized_peers(&self, authorized: &[Pubkey]) {
+        let mut peers = self.inner.peers.lock().await;
+        let to_drop: Vec<u64> = peers
+            .iter()
+            .filter_map(|(id, slot)| match slot.pubkey {
+                Some(pk) if !authorized.contains(&pk) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in to_drop {
+            if let Some(slot) = peers.remove(&id) {
+                // Closing the channel makes the peer's writer task exit and
+                // tear down the websocket; the reader+notif tasks follow.
+                drop(slot);
+                debug!(peer_id = id, "dropping unauthorized peer");
+            }
+        }
+    }
 }
 
-// -- fs event debouncing (disk -> doc) --
-
-/// How long to wait after the latest event for a path before processing it.
-/// Sized to absorb editor save patterns: vim/VS Code atomic rename takes
-/// <10ms, but truncate+write editors and slow saves can stretch out further.
 const FS_DEBOUNCE: Duration = Duration::from_millis(150);
 
 async fn debounced_fs_loop(
@@ -883,9 +901,6 @@ async fn debounced_fs_loop(
 
     loop {
         let now = Instant::now();
-        // Wait until either a new event arrives or the soonest pending
-        // deadline expires. If nothing is pending, sleep for an effectively
-        // unbounded window (the recv() arm will wake us).
         let next_wait = pending
             .values()
             .map(|(_, t)| t.saturating_duration_since(now))
@@ -901,11 +916,9 @@ async fn debounced_fs_loop(
                             FsEvent::Touched(p) | FsEvent::Removed(p) => p.clone(),
                             FsEvent::Renamed { to, .. } => to.clone(),
                         };
-                        // Newest event wins, deadline reset.
                         pending.insert(path, (ev, Instant::now() + FS_DEBOUNCE));
                     }
                     None => {
-                        // Channel closed; flush remaining and exit.
                         flush_expired(&inner, &binding, &mut pending, true).await;
                         return;
                     }
@@ -939,8 +952,6 @@ async fn flush_expired(
     }
 }
 
-// -- materialization (doc -> disk) --
-
 async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> Result<()> {
     let (files, dirs) = {
         let mut doc = inner.doc.lock().await;
@@ -952,11 +963,6 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
     let live_dirs: std::collections::HashSet<String> =
         dirs.into_iter().map(|d| d.path).collect();
 
-    // Create any directories the doc has but the materializer hasn't observed
-    // on disk yet. Skip ones we've already materialized — re-creating them
-    // every tick would race a user-driven remove (their `rmdir` would be
-    // silently undone before the fs event has a chance to tombstone the doc
-    // entry).
     {
         let mut materialized_dirs = binding.materialized_dirs.lock().await;
         let mut ordered: Vec<&String> = live_dirs
@@ -974,17 +980,13 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         }
     }
 
-    // Snapshot of what we currently believe is on disk.
     let existing: HashMap<String, String> = binding.materialized.lock().await.clone();
     let last_ingested: HashMap<String, String> =
         binding.last_ingested.lock().await.clone();
 
-    // Removals: anything we previously wrote but is no longer in `live`.
     for path in existing.keys() {
         if !live.contains_key(path) {
             let abs = binding.vault_path_to_fs_path(path);
-            // Before removing, check if disk has user-edited content not yet
-            // ingested. If so, defer this round so the user's save isn't lost.
             let disk_hash = match binding.adapter().read(&abs).await {
                 Ok(b) => Some(content_hash(&b)),
                 Err(_) => None,
@@ -1007,7 +1009,6 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         }
     }
 
-    // Writes/updates.
     for (path, meta) in &live {
         match meta.kind {
             FileKind::Text => {
@@ -1021,16 +1022,12 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
                 }
                 let abs = binding.vault_path_to_fs_path(path);
 
-                // Read current disk state. If disk has user-edited content we
-                // haven't ingested yet, skip this round — overwriting would
-                // silently drop the user's save.
                 let disk_hash = match binding.adapter().read(&abs).await {
                     Ok(b) => Some(content_hash(&b)),
                     Err(_) => None,
                 };
                 if let Some(d) = &disk_hash {
                     if d.as_str() == target_hash.as_str() {
-                        // Disk already matches doc; no write needed.
                         binding
                             .materialized
                             .lock()
@@ -1065,7 +1062,7 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
                 if let Some(h) = &meta.binary_hash {
                     let bytes = match inner.blob_store.get(h).await {
                         Ok(b) => b,
-                        Err(_) => continue, // blob not yet available
+                        Err(_) => continue,
                     };
                     let cur = existing.get(path).cloned();
                     if cur.as_deref() == Some(h.as_str()) {
@@ -1111,7 +1108,6 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         }
     }
 
-    // Drop entries from bookkeeping for files no longer live.
     binding
         .materialized
         .lock()
@@ -1123,11 +1119,6 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         .await
         .retain(|p, _| live.contains_key(p));
 
-    // Directory removals. A directory we previously materialized but is no
-    // longer live in the doc should disappear from disk too. We only attempt
-    // to remove empty directories — anything left under them either belongs
-    // to an excluded subtree (e.g. .git) or is a file we deferred deleting.
-    // Process deepest paths first so children are gone before parents.
     {
         let mut materialized_dirs = binding.materialized_dirs.lock().await;
         let to_remove: Vec<String> = materialized_dirs
@@ -1147,9 +1138,6 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
                     materialized_dirs.remove(&path);
                 }
                 Err(e) => {
-                    // Most likely the dir isn't empty (deferred file delete or
-                    // a non-tracked file). Leave it on disk; we'll retry on
-                    // the next materialize tick.
                     tracing::debug!(path, error=%e, "materialize: skipping non-empty dir");
                 }
             }
@@ -1158,9 +1146,6 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
     Ok(())
 }
 
-/// Disk content is safe to overwrite if it matches what we last materialized
-/// (no local edit has happened) or what we last ingested (the local edit is
-/// already captured by the doc).
 fn is_safe_to_overwrite(
     disk_hash: &str,
     last_materialized: Option<&String>,
@@ -1170,7 +1155,6 @@ fn is_safe_to_overwrite(
         || last_ingested.map(|s| s.as_str()) == Some(disk_hash)
 }
 
-/// Helper for tests: peek live file paths.
 impl Vault {
     pub async fn debug_dump(&self) -> Result<Vec<(String, Option<String>)>> {
         let mut doc = self.inner.doc.lock().await;

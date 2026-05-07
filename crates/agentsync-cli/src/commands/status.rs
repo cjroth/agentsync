@@ -8,12 +8,13 @@ pub async fn run(args: StatusArgs) -> Result<()> {
     let path = args.path.canonicalize().unwrap_or(args.path.clone());
     let cfg = require_config(&path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
-    let key = config::resolve_key(&cfg, None)?;
+    let identity = config::resolve_identity(&path, &cfg)?;
     let opts = OpenOptions {
         rendezvous_url: cfg.vault.rendezvous_url.clone(),
         vault_id: vault_id.clone(),
-        vault_key: key,
+        identity,
         storage_path: path.join(".agentsync"),
+        hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
     };
     let vault = Vault::open(opts).await?;
     let files = vault.list_files().await?;
@@ -23,6 +24,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
         "rendezvous:     {}",
         cfg.vault.rendezvous_url.as_deref().unwrap_or("(none)")
     );
+    println!("identity_pub:   {}", vault.pubkey().to_ssh_string());
     println!("file count:     {}", files.len());
     Ok(())
 }

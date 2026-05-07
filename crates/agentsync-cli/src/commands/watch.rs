@@ -11,13 +11,21 @@ pub async fn run(args: WatchArgs) -> Result<()> {
         None => std::env::current_dir()?,
     };
     let path = path.canonicalize().unwrap_or(path);
-    let cfg = require_config(&path)?;
+    let mut cfg = require_config(&path)?;
     let vault_id = cfg
         .vault
         .id
         .clone()
         .context(".agentsync/config.toml: vault.id missing")?;
-    let key = config::resolve_key(&cfg, None)?;
+    // CLI flags override config — let the user pick agent backend at runtime
+    // without persisting it.
+    if let Some(p) = &args.identity_agent {
+        cfg.identity.agent_socket = Some(p.to_string_lossy().into_owned());
+    }
+    if let Some(s) = &args.identity_agent_pubkey {
+        cfg.identity.agent_pubkey = Some(load_pubkey_arg(s)?);
+    }
+    let identity = config::resolve_identity(&path, &cfg)?;
     let storage = path.join(".agentsync");
 
     // Resolve rendezvous URL: --rendezvous flag wins, else config.toml,
@@ -33,8 +41,9 @@ pub async fn run(args: WatchArgs) -> Result<()> {
     let opts = OpenOptions {
         rendezvous_url: rendezvous_url.clone(),
         vault_id,
-        vault_key: key,
+        identity,
         storage_path: storage,
+        hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
     };
     let mut vault = Vault::open(opts).await?;
 
@@ -47,7 +56,7 @@ pub async fn run(args: WatchArgs) -> Result<()> {
             .with_context(|| format!("invalid --listen address: {}", addr))?;
         let bound = vault.listen(parsed).await?;
         info!(addr = %bound, "listening for peers");
-        println!("listening on ws://{}", bound);
+        println!("listening on wss://{}", bound);
     } else if let Some(url) = &rendezvous_url {
         // Hand off to the supervisor: it does the initial connect with
         // backoff and reconnects automatically if the rendezvous goes away.
@@ -61,6 +70,7 @@ pub async fn run(args: WatchArgs) -> Result<()> {
 
     println!("watching {}", path.display());
     println!("vault_id: {}", vault.id());
+    println!("identity_pub: {}", vault.pubkey().to_ssh_string());
 
     // Keep running until SIGINT.
     tokio::signal::ctrl_c().await?;
@@ -69,4 +79,20 @@ pub async fn run(args: WatchArgs) -> Result<()> {
     vault.unlisten().await;
     vault.flush().await?;
     Ok(())
+}
+
+/// Parse an `--identity-agent-pubkey` argument: either a literal
+/// `ssh-ed25519 <base64>` string, or a path to a file containing one
+/// (matching the `<identity>.pub` sidecar `agentsync key generate` writes).
+fn load_pubkey_arg(s: &str) -> Result<String> {
+    if s.starts_with("ssh-") {
+        return Ok(s.to_string());
+    }
+    let bytes = std::fs::read_to_string(s)
+        .with_context(|| format!("read pubkey file at {}", s))?;
+    let line = bytes
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty pubkey file at {}", s))?;
+    Ok(line.trim().to_string())
 }

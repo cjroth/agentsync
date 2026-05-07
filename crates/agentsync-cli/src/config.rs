@@ -1,3 +1,4 @@
+use agentsync_core::{Identity, Pubkey};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ pub struct ConfigFile {
     #[serde(default)]
     pub vault: VaultSection,
     #[serde(default)]
-    pub key: KeySection,
+    pub identity: IdentitySection,
     #[serde(default)]
     pub sync: SyncSection,
 }
@@ -16,29 +17,27 @@ pub struct ConfigFile {
 pub struct VaultSection {
     pub id: Option<String>,
     pub rendezvous_url: Option<String>,
+    /// TOFU-pinned hub identity pubkey (Phase 4). Optional in Phases 1-3.
+    pub hub_pubkey: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct KeySection {
-    /// "keyring" | "env" | "file"
-    pub source: Option<String>,
-    pub keyring_name: Option<String>,
-    /// Inline base64 key, only used when source = "file".
-    pub key_b64: Option<String>,
-    pub env_var: Option<String>,
+pub struct IdentitySection {
+    /// Path to the on-disk identity secret (default: `.agentsync/identity`).
+    /// Relative paths are resolved against the vault root.
+    pub path: Option<String>,
+    /// Phase 3: ssh-agent socket path.
+    pub agent_socket: Option<String>,
+    /// Phase 3: pubkey selecting which identity in the agent to use.
+    pub agent_pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncSection {
-    /// File extensions (without the dot) to sync. Defaults to markdown only.
-    /// Each extension here generates an `**/*.<ext>` include pattern and is
-    /// ingested as Automerge text.
     #[serde(default = "default_extensions")]
     pub extensions: Vec<String>,
     #[serde(default = "default_exclude")]
     pub exclude: Vec<String>,
-    /// Extra glob patterns to include beyond what `extensions` produces.
-    /// If non-empty, these are appended to the derived include list.
     #[serde(default)]
     pub include: Vec<String>,
     #[serde(default = "default_attachment_max")]
@@ -84,8 +83,6 @@ impl Default for SyncSection {
 }
 
 impl SyncSection {
-    /// Resolve to an `agentsync_core::BindOptions` honoring `extensions`,
-    /// `include`, and `exclude`.
     pub fn to_bind_options(&self) -> agentsync_core::BindOptions {
         let mut include: Vec<String> = self
             .extensions
@@ -138,41 +135,67 @@ pub fn write(vault_root: &Path, cfg: &ConfigFile) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_key(cfg: &ConfigFile, env_override: Option<&str>) -> Result<[u8; 32]> {
-    if let Some(b64) = env_override {
-        return agentsync_core::decode_key(b64).map_err(|e| anyhow::anyhow!(e));
-    }
-    let source = cfg.key.source.as_deref().unwrap_or("env");
-    match source {
-        "env" => {
-            let var = cfg.key.env_var.as_deref().unwrap_or("AGENTSYNC_KEY");
-            let v = std::env::var(var)
-                .with_context(|| format!("env var {} not set", var))?;
-            agentsync_core::decode_key(&v).map_err(|e| anyhow::anyhow!(e))
-        }
-        "file" => {
-            let b64 = cfg
-                .key
-                .key_b64
-                .as_deref()
-                .context("config.toml [key] missing key_b64 for file source")?;
-            agentsync_core::decode_key(b64).map_err(|e| anyhow::anyhow!(e))
-        }
-        "keyring" => {
-            // Keyring backend is out of scope for v1; users can still drop to env.
-            let var = cfg.key.env_var.as_deref().unwrap_or("AGENTSYNC_KEY");
-            let v = std::env::var(var).with_context(|| {
-                format!(
-                    "keyring source not yet implemented; set {} as fallback",
-                    var
-                )
-            })?;
-            agentsync_core::decode_key(&v).map_err(|e| anyhow::anyhow!(e))
-        }
-        other => Err(anyhow::anyhow!(
-            "unknown key source: {}, expected env|file|keyring",
-            other
-        )),
+/// Resolve the configured identity-secret path against the vault root.
+pub fn identity_path(vault_root: &Path, cfg: &ConfigFile) -> PathBuf {
+    let rel = cfg
+        .identity
+        .path
+        .as_deref()
+        .unwrap_or(".agentsync/identity");
+    let p = PathBuf::from(rel);
+    if p.is_absolute() {
+        p
+    } else {
+        vault_root.join(p)
     }
 }
 
+/// Resolve the configured identity. Discovery rules per AUTH.md Phase 3:
+/// CLI flag > config field > $SSH_AUTH_SOCK env var (only when both
+/// `agent_pubkey` is set and the agent socket can be located).
+///
+/// File backend is the default; agent backend is selected when
+/// `[identity] agent_pubkey` is set in config or via the
+/// `--identity-agent-pubkey` flag.
+pub fn resolve_identity(vault_root: &Path, cfg: &ConfigFile) -> Result<Identity> {
+    if let Some(agent_pubkey_str) = cfg.identity.agent_pubkey.as_deref() {
+        let agent_pk = Pubkey::from_ssh_string(agent_pubkey_str)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let socket = resolve_agent_socket(cfg)?;
+        return Ok(Identity::from_agent(socket, agent_pk));
+    }
+
+    let path = identity_path(vault_root, cfg);
+    if !path.exists() {
+        anyhow::bail!(
+            "identity file not found at {}. \
+             Run `agentsync key generate` to create one, then add the printed pubkey \
+             to peers.md before connecting.",
+            path.display()
+        );
+    }
+    Identity::load_from_file(&path).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Parse the optional `[vault] hub_pubkey` field into a Pubkey. Returns
+/// `None` if the field is absent. Errors on malformed input — better to
+/// fail loud than silently strip the pin.
+pub fn resolve_hub_pubkey(cfg: &ConfigFile) -> Result<Option<Pubkey>> {
+    match cfg.vault.hub_pubkey.as_deref() {
+        None => Ok(None),
+        Some(s) => Pubkey::from_ssh_string(s)
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!(e)),
+    }
+}
+
+fn resolve_agent_socket(cfg: &ConfigFile) -> Result<PathBuf> {
+    if let Some(s) = cfg.identity.agent_socket.as_deref() {
+        return Ok(PathBuf::from(s));
+    }
+    let env = std::env::var("SSH_AUTH_SOCK").context(
+        "agent identity selected but no [identity] agent_socket and \
+         $SSH_AUTH_SOCK is unset",
+    )?;
+    Ok(PathBuf::from(env))
+}

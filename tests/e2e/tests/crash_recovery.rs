@@ -11,7 +11,7 @@ async fn doc_bin_round_trip() {
     let storage = dir.path().join(".agentsync");
     let (vault, created) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: storage.clone(),
     })
     .await
@@ -24,8 +24,9 @@ async fn doc_bin_round_trip() {
     let v2 = Vault::open(OpenOptions {
         rendezvous_url: None,
         vault_id: created.vault_id.clone(),
-        vault_key: created.vault_key,
+        identity: created.identity,
         storage_path: storage,
+        hub_pubkey: None,
     })
     .await
     .unwrap();
@@ -40,7 +41,7 @@ async fn snapshot_label_round_trip() {
     let dir = tempdir().unwrap();
     let (vault, _) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: dir.path().join(".agentsync"),
     })
     .await
@@ -60,7 +61,7 @@ async fn restore_to_label_resets_content() {
     let dir = tempdir().unwrap();
     let (mut vault, _) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: dir.path().join(".agentsync"),
     })
     .await
@@ -92,7 +93,7 @@ async fn ingest_existing_files_on_bind() {
     let storage = dir.path().join(".agentsync");
     let (mut vault, _) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: storage,
     })
     .await

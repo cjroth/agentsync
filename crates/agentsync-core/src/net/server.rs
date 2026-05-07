@@ -1,7 +1,9 @@
-use crate::auth::{verify_auth_token, VaultKey};
+use crate::auth::{build_transcript, random_nonce, NONCE_LEN};
 use crate::error::{Error, Result};
+use crate::identity::{Identity, Pubkey};
 use crate::net::client::handle_inbound;
 use crate::net::protocol::Frame;
+use crate::tls::{cert_fingerprint, server_config};
 use crate::vault::SyncHandle;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -10,29 +12,44 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
+
+type AcceptedStream = TlsStream<tokio::net::TcpStream>;
 
 /// `agentsync --listen` server. Accepts websocket connections from peers and
 /// bridges each one to its own SyncState within the local vault.
 pub struct Server {
     accept_task: Option<JoinHandle<()>>,
+    enforcer_task: Option<JoinHandle<()>>,
     shutdown_tx: broadcast::Sender<()>,
     peer_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub bound_addr: SocketAddr,
 }
 
 impl Server {
+    /// Bind the listener with a self-signed TLS cert. The cert is loaded
+    /// from `<storage_path>/../.agentsync-server/` if present, otherwise a
+    /// fresh one is generated and persisted there.
     pub async fn bind(
         addr: SocketAddr,
         vault_id: String,
-        vault_key: VaultKey,
+        identity: Identity,
         sync_handle: Arc<dyn SyncHandle>,
+        cert_der: Vec<u8>,
+        key_der: Vec<u8>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let bound = listener.local_addr()?;
         info!(addr = %bound, vault_id, "rendezvous listening");
+
+        let server_tls = server_config(cert_der.clone(), key_der)?;
+        let acceptor = TlsAcceptor::from(server_tls);
+        let cert_fp = cert_fingerprint(&cert_der);
 
         let (shutdown_tx, _) = broadcast::channel::<()>(8);
         let peer_tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -40,6 +57,10 @@ impl Server {
         let accept_shutdown_tx = shutdown_tx.clone();
         let mut accept_shutdown = shutdown_tx.subscribe();
         let peer_tasks_for_accept = peer_tasks.clone();
+        let identity_for_accept = identity.clone();
+        let sync_handle_for_accept = sync_handle.clone();
+        let vault_id_for_accept = vault_id.clone();
+        let acceptor_for_accept = acceptor.clone();
         let accept = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -53,17 +74,26 @@ impl Server {
                                 continue;
                             }
                         };
-                        let vault_id = vault_id.clone();
-                        let vault_key = vault_key;
-                        let sync_handle = sync_handle.clone();
+                        let vault_id = vault_id_for_accept.clone();
+                        let identity = identity_for_accept.clone();
+                        let sync_handle = sync_handle_for_accept.clone();
+                        let acceptor = acceptor_for_accept.clone();
                         let peer_shutdown = accept_shutdown_tx.subscribe();
                         let task = tokio::spawn(async move {
+                            let tls_stream = match acceptor.accept(stream).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!(peer=%peer_addr, error=%e, "tls accept");
+                                    return;
+                                }
+                            };
                             if let Err(e) = handle_peer(
-                                stream,
+                                tls_stream,
                                 peer_addr,
                                 vault_id,
-                                vault_key,
+                                identity,
                                 sync_handle,
+                                cert_fp,
                                 peer_shutdown,
                             )
                             .await
@@ -77,21 +107,36 @@ impl Server {
             }
         });
 
+        let mut enforcer_shutdown = shutdown_tx.subscribe();
+        let enforcer_handle = sync_handle.clone();
+        let enforcer = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = enforcer_shutdown.recv() => break,
+                    _ = enforcer_handle.wait_doc_changed() => {
+                        let authorized = enforcer_handle.authorized_pubkeys().await;
+                        enforcer_handle.disconnect_unauthorized_peers(&authorized).await;
+                    }
+                }
+            }
+        });
+
         Ok(Server {
             accept_task: Some(accept),
+            enforcer_task: Some(enforcer),
             shutdown_tx,
             peer_tasks,
             bound_addr: bound,
         })
     }
 
-    /// Stop accepting new peers and gracefully close every active peer
-    /// connection (each writer sends a Close frame before the socket is torn
-    /// down). Bounded by a short timeout so an unresponsive peer can't hang
-    /// shutdown indefinitely.
     pub async fn shutdown(mut self) {
         let _ = self.shutdown_tx.send(());
         if let Some(h) = self.accept_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
+        }
+        if let Some(h) = self.enforcer_task.take() {
             let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
         }
         let mut tasks = self.peer_tasks.lock().await;
@@ -107,68 +152,120 @@ impl Drop for Server {
         if let Some(h) = self.accept_task.take() {
             h.abort();
         }
-        // Outstanding peer_tasks: signaled via broadcast above. We can't await
-        // in Drop, so they'll race with runtime teardown. Callers that care
-        // about graceful close should call `shutdown().await`.
+        if let Some(h) = self.enforcer_task.take() {
+            h.abort();
+        }
     }
 }
 
 async fn handle_peer(
-    stream: tokio::net::TcpStream,
+    stream: AcceptedStream,
     peer_addr: SocketAddr,
     vault_id: String,
-    vault_key: VaultKey,
+    identity: Identity,
     sync_handle: Arc<dyn SyncHandle>,
+    cert_fp: [u8; 32],
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
     let ws = accept_async(stream).await?;
     let (mut writer, mut reader) = ws.split();
 
-    // Receive HELLO.
-    let hello_bytes = match reader.next().await {
-        Some(Ok(Message::Binary(b))) => b,
-        _ => {
-            return Err(Error::Protocol("missing hello".into()));
-        }
-    };
-    let hello = Frame::decode(&hello_bytes)?;
-    let (their_vault, their_token, _op) = match hello {
-        Frame::Hello {
-            vault_id: vid,
-            auth_token,
-            op,
-        } => (vid, auth_token, op),
-        _ => return Err(Error::Protocol("first frame must be hello".into())),
-    };
-    // If the client volunteered a vault_id, it must match. If they didn't
-    // (fresh-clone path), we'll just tell them what ours is in HelloAck.
-    if let Some(vid) = &their_vault {
-        if vid != &vault_id {
-            let err = Frame::Error {
-                message: format!("vault mismatch: expected {}", vault_id),
-            };
-            let _ = writer.send(Message::binary(err.encode()?)).await;
-            return Err(Error::Auth("vault id mismatch".into()));
-        }
-    }
-    if !verify_auth_token(&vault_key, &their_token) {
-        let err = Frame::Error {
-            message: "auth token rejected".into(),
-        };
-        let _ = writer.send(Message::binary(err.encode()?)).await;
-        return Err(Error::Auth("token mismatch".into()));
-    }
-    let ack = Frame::HelloAck {
+    let hub_pubkey = identity.pubkey();
+    let hub_nonce = random_nonce();
+    // Channel binding: cover the SHA-256 of the listener's TLS cert so a
+    // relayed MITM cannot substitute its own TLS endpoint.
+    let tls_fp: Vec<u8> = cert_fp.to_vec();
+    let hello_hub = Frame::HelloHub {
         vault_id: vault_id.clone(),
+        hub_identity_pubkey: hub_pubkey.as_bytes().to_vec(),
+        hub_nonce: hub_nonce.to_vec(),
+        tls_cert_fingerprint: tls_fp.clone(),
     };
-    writer.send(Message::binary(ack.encode()?)).await?;
-    info!(peer=%peer_addr, "peer authenticated");
+    writer.send(Message::binary(hello_hub.encode()?)).await?;
 
-    // Register the peer with the sync hub.
+    let frame = read_one_frame(&mut reader).await?;
+    let (peer_pubkey_bytes, peer_nonce_bytes, _op) = match frame {
+        Frame::HelloPeer {
+            peer_identity_pubkey,
+            peer_nonce,
+            op,
+        } => (peer_identity_pubkey, peer_nonce, op),
+        Frame::Error { message } => {
+            return Err(Error::Protocol(format!(
+                "peer reported error: {}",
+                message
+            )));
+        }
+        _ => return Err(Error::Protocol("expected HelloPeer".into())),
+    };
+    let peer_pubkey = Pubkey::from_bytes(&peer_pubkey_bytes)?;
+    if peer_nonce_bytes.len() != NONCE_LEN {
+        return Err(Error::Protocol("peer nonce wrong length".into()));
+    }
+    let mut peer_nonce = [0u8; NONCE_LEN];
+    peer_nonce.copy_from_slice(&peer_nonce_bytes);
+
+    let authorized = sync_handle.authorized_pubkeys().await;
+    if !authorized.contains(&peer_pubkey) {
+        let _ = writer
+            .send(Message::binary(
+                Frame::Error {
+                    message: format!(
+                        "peer pubkey {} not authorized",
+                        peer_pubkey.fingerprint_sha256()
+                    ),
+                }
+                .encode()?,
+            ))
+            .await;
+        return Err(Error::Auth(format!(
+            "peer not in peers.md: {}",
+            peer_pubkey.fingerprint_sha256()
+        )));
+    }
+
+    let transcript = build_transcript(
+        &hub_nonce,
+        &peer_nonce,
+        &tls_fp,
+        hub_pubkey.as_bytes(),
+        peer_pubkey.as_bytes(),
+    );
+    let hub_sig = identity.sign(&transcript).await?;
+    let proof_hub = Frame::ProofHub {
+        sig: hub_sig.to_vec(),
+    };
+    writer.send(Message::binary(proof_hub.encode()?)).await?;
+
+    let frame = read_one_frame(&mut reader).await?;
+    let peer_sig = match frame {
+        Frame::ProofPeer { sig } => sig,
+        Frame::Error { message } => {
+            return Err(Error::Protocol(format!(
+                "peer reported error: {}",
+                message
+            )));
+        }
+        _ => return Err(Error::Protocol("expected ProofPeer".into())),
+    };
+    if !peer_pubkey.verify(&transcript, &peer_sig) {
+        let _ = writer
+            .send(Message::binary(
+                Frame::Error {
+                    message: "peer signature failed verification".into(),
+                }
+                .encode()?,
+            ))
+            .await;
+        return Err(Error::Auth("peer signature failed verification".into()));
+    }
+    info!(peer=%peer_addr, fp=%peer_pubkey.fingerprint_sha256(), "peer authenticated");
+
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
-    let peer_id = sync_handle.register_peer(out_tx.clone()).await?;
+    let peer_id = sync_handle
+        .register_peer(out_tx.clone(), Some(peer_pubkey))
+        .await?;
 
-    // Initial sync message.
     if let Some(msg) = sync_handle.generate_sync_message(peer_id).await? {
         let _ = out_tx.send(Frame::Sync { bytes: msg });
     }
@@ -248,17 +345,29 @@ async fn handle_peer(
         }
     });
 
-    // The writer task is the primary lifecycle driver: it exits on graceful
-    // shutdown, on a peer-side close, or on a write error. When it does, tear
-    // down the others. The reader will exit naturally once writer closes its
-    // side of the websocket (TCP EOF), so we wait briefly for it; notif has
-    // a forever loop so we abort it.
     let _ = writer_task.await;
     notif_task.abort();
     let _ = tokio::time::timeout(Duration::from_millis(500), reader_task).await;
-    // Idempotent — reader_task may have already done this on a peer-initiated
-    // close. Calling it here too covers the shutdown-aborted-reader case.
     sync_handle.unregister_peer(peer_id).await;
     debug!(peer_id, "peer handler exited");
     Ok(())
+}
+
+async fn read_one_frame<S>(
+    reader: &mut futures_util::stream::SplitStream<WebSocketStream<S>>,
+) -> Result<Frame>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        match reader.next().await {
+            Some(Ok(Message::Binary(b))) => return Frame::decode(&b),
+            Some(Ok(Message::Close(_))) => {
+                return Err(Error::Network("connection closed mid-handshake".into()));
+            }
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => return Err(Error::WebSocket(e.to_string())),
+            None => return Err(Error::Network("stream ended mid-handshake".into())),
+        }
+    }
 }

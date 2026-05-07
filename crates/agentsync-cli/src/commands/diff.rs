@@ -8,12 +8,13 @@ pub async fn run(args: DiffArgs) -> Result<()> {
     let path = args.path.canonicalize().unwrap_or(args.path.clone());
     let cfg = require_config(&path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
-    let key = config::resolve_key(&cfg, None)?;
+    let identity = config::resolve_identity(&path, &cfg)?;
     let vault = Vault::open(OpenOptions {
         rendezvous_url: cfg.vault.rendezvous_url.clone(),
         vault_id,
-        vault_key: key,
+        identity,
         storage_path: path.join(".agentsync"),
+        hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
     })
     .await?;
     let files = vault.list_files().await?;

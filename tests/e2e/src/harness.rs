@@ -1,4 +1,6 @@
-use agentsync_core::{encode_key, generate_vault_key, CreateOptions, Vault, VaultKey};
+use agentsync_core::{
+    render_peers_md, AuthorizedPeer, CreateOptions, Identity, Pubkey, Vault,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -14,10 +16,11 @@ use tokio::time::Instant;
 pub struct E2EVault {
     binary: PathBuf,
     pub vault_id: String,
-    pub vault_key_b64: String,
     pub rendezvous_url: String,
     pub rendezvous: Peer,
     pub peers: Vec<Peer>,
+    /// Authorized peer pubkeys, kept in sync with the on-disk peers.md.
+    authorized: Vec<AuthorizedPeer>,
 }
 
 /// One running `agentsync` process bound to a temp directory. `proc` is
@@ -26,6 +29,7 @@ pub struct E2EVault {
 pub struct Peer {
     pub name: String,
     pub dir: TempDir,
+    pub identity: Identity,
     proc: Option<Child>,
 }
 
@@ -34,31 +38,17 @@ impl E2EVault {
     pub async fn new() -> Result<Self> {
         let binary = locate_binary()?;
 
-        // Bootstrap the rendezvous storage in-process so we know the vault_id
-        // and key up front. The CLI we spawn afterwards loads this state.
-        let rendezvous_dir = TempDir::new()?;
-        let storage = rendezvous_dir.path().join(".agentsync");
-        let vault_key: VaultKey = generate_vault_key();
-        let (vault, created) = Vault::create(CreateOptions {
-            rendezvous_url: None,
-            vault_key: Some(vault_key),
-            storage_path: storage.clone(),
-        })
-        .await?;
-        vault.flush().await?;
-        drop(vault); // release any background tasks holding the storage
+        let (rendezvous_dir, rendezvous_identity, vault_id) =
+            bootstrap_rendezvous_storage().await?;
 
-        let vault_id = created.vault_id;
-        let vault_key_b64 = encode_key(&created.vault_key);
+        let mut authorized = vec![AuthorizedPeer {
+            pubkey: rendezvous_identity.pubkey(),
+            label: "rendezvous".into(),
+        }];
+        write_peers_md(rendezvous_dir.path(), &authorized)?;
+        write_config(rendezvous_dir.path(), &vault_id, None)?;
 
-        write_config(
-            rendezvous_dir.path(),
-            &vault_id,
-            None,
-        )?;
-
-        // Bind to a random port. We'll parse the actual port from stdout.
-        let mut cmd = base_command(&binary, rendezvous_dir.path(), &vault_key_b64);
+        let mut cmd = base_command(&binary, rendezvous_dir.path());
         cmd.arg("--listen").arg("127.0.0.1:0");
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -69,34 +59,52 @@ impl E2EVault {
         let port = read_listen_port(&mut child)
             .await
             .context("waiting for rendezvous to bind")?;
-        let rendezvous_url = format!("ws://127.0.0.1:{}", port);
+        let rendezvous_url = format!("wss://127.0.0.1:{}", port);
 
-        // Drain remaining stdout/stderr so the pipes don't fill.
         spawn_log_drainer(&mut child, "rendezvous");
 
         let rendezvous = Peer {
             name: "rendezvous".into(),
             dir: rendezvous_dir,
+            identity: rendezvous_identity.clone(),
             proc: Some(child),
         };
+
+        // Sort the authorized list deterministically (cheap, helps tests that
+        // diff peers.md content).
+        authorized.sort_by(|a, b| a.label.cmp(&b.label));
 
         Ok(E2EVault {
             binary,
             vault_id,
-            vault_key_b64,
             rendezvous_url,
             rendezvous,
             peers: Vec::new(),
+            authorized,
         })
     }
 
-    /// Add a new client peer that connects to the rendezvous. Returns the
-    /// index of the new peer in `self.peers`.
+    /// Add a new client peer that connects to the rendezvous. Generates a
+    /// fresh ed25519 identity, authorizes it on the hub (by appending to
+    /// peers.md on the hub's disk), and waits for the spawned peer to reach
+    /// the watching state.
     pub async fn add_peer(&mut self, name: &str) -> Result<usize> {
         let dir = TempDir::new()?;
+        let identity = Identity::generate();
+
+        // Persist the peer's identity at the default per-vault location.
+        let id_path = dir.path().join(".agentsync").join("identity");
+        identity
+            .save_to_file(&id_path)
+            .context("write peer identity")?;
+
+        // Authorize the peer on the hub side BEFORE the connect attempt; the
+        // hub's file watcher ingests peers.md within the debounce window.
+        self.authorize_peer(name, &identity.pubkey()).await?;
+
         write_config(dir.path(), &self.vault_id, Some(&self.rendezvous_url))?;
 
-        let mut cmd = base_command(&self.binary, dir.path(), &self.vault_key_b64);
+        let mut cmd = base_command(&self.binary, dir.path());
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -112,12 +120,40 @@ impl E2EVault {
         self.peers.push(Peer {
             name: name.to_string(),
             dir,
+            identity,
             proc: Some(child),
         });
         // Allow the freshly-connected peer to complete the initial sync round
         // before tests start writing.
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(self.peers.len() - 1)
+    }
+
+    /// Append `pubkey` to the hub's peers.md (on disk and in memory) so the
+    /// hub will accept connections from a peer holding the matching identity.
+    pub async fn authorize_peer(&mut self, label: &str, pubkey: &Pubkey) -> Result<()> {
+        if self.authorized.iter().any(|p| p.pubkey == *pubkey) {
+            return Ok(());
+        }
+        self.authorized.push(AuthorizedPeer {
+            pubkey: *pubkey,
+            label: label.to_string(),
+        });
+        write_peers_md(self.rendezvous.dir.path(), &self.authorized)?;
+        // Give the rendezvous's fs watcher a moment to ingest the change. The
+        // engine's debounce window is ~150ms; round up generously.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Ok(())
+    }
+
+    /// Remove a peer's pubkey from the hub's peers.md. After the rendezvous
+    /// re-evaluates authorizations, any currently-connected peer with that
+    /// pubkey is dropped.
+    pub async fn deauthorize_peer(&mut self, pubkey: &Pubkey) -> Result<()> {
+        self.authorized.retain(|p| p.pubkey != *pubkey);
+        write_peers_md(self.rendezvous.dir.path(), &self.authorized)?;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Ok(())
     }
 
     pub fn peer(&self, idx: usize) -> &Peer {
@@ -131,8 +167,6 @@ impl E2EVault {
         self.peers.iter().find(|p| p.name == name)
     }
 
-    /// Kill every spawned process. Drop also does this — call explicitly when
-    /// you want a deterministic teardown point (or to surface errors).
     pub async fn shutdown(mut self) {
         if let Some(c) = self.rendezvous.proc.as_mut() {
             let _ = c.kill().await;
@@ -144,18 +178,15 @@ impl E2EVault {
         }
     }
 
-    /// Port the rendezvous bound to. Stable across kill/restart so callers can
-    /// exercise reconnect behavior without the OS picking a different port.
     pub fn rendezvous_port(&self) -> u16 {
         self.rendezvous_url
-            .strip_prefix("ws://")
+            .strip_prefix("wss://")
+            .or_else(|| self.rendezvous_url.strip_prefix("ws://"))
             .and_then(|rest| rest.rsplit_once(':'))
             .and_then(|(_, p)| p.parse().ok())
             .expect("malformed rendezvous URL")
     }
 
-    /// Kill the rendezvous and wait for the OS to release its port. Storage
-    /// dir is preserved so `restart_rendezvous()` can resume the same vault.
     pub async fn kill_rendezvous(&mut self) -> Result<()> {
         if let Some(c) = self.rendezvous.proc.as_mut() {
             let _ = c.kill().await;
@@ -165,10 +196,9 @@ impl E2EVault {
         Ok(())
     }
 
-    /// Spawn a fresh rendezvous bound to the original port + storage dir.
     pub async fn restart_rendezvous(&mut self) -> Result<()> {
         let port = self.rendezvous_port();
-        let mut cmd = base_command(&self.binary, self.rendezvous.dir.path(), &self.vault_key_b64);
+        let mut cmd = base_command(&self.binary, self.rendezvous.dir.path());
         cmd.arg("--listen").arg(format!("127.0.0.1:{}", port));
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -186,26 +216,17 @@ impl E2EVault {
         Ok(())
     }
 
-    /// Like `new()` but does not spawn the rendezvous process. The vault
-    /// state is created on disk and a free port is reserved (then released)
-    /// so a peer can be pointed at it before the rendezvous is up. Use
-    /// `start_rendezvous()` when ready.
     pub async fn prepared_offline() -> Result<Self> {
         let binary = locate_binary()?;
-        let rendezvous_dir = TempDir::new()?;
-        let storage = rendezvous_dir.path().join(".agentsync");
-        let vault_key: VaultKey = generate_vault_key();
-        let (vault, created) = Vault::create(CreateOptions {
-            rendezvous_url: None,
-            vault_key: Some(vault_key),
-            storage_path: storage.clone(),
-        })
-        .await?;
-        vault.flush().await?;
-        drop(vault);
 
-        let vault_id = created.vault_id;
-        let vault_key_b64 = encode_key(&created.vault_key);
+        let (rendezvous_dir, rendezvous_identity, vault_id) =
+            bootstrap_rendezvous_storage().await?;
+
+        let authorized = vec![AuthorizedPeer {
+            pubkey: rendezvous_identity.pubkey(),
+            label: "rendezvous".into(),
+        }];
+        write_peers_md(rendezvous_dir.path(), &authorized)?;
         write_config(rendezvous_dir.path(), &vault_id, None)?;
 
         // Reserve a free port by binding then immediately releasing it.
@@ -214,31 +235,30 @@ impl E2EVault {
         let port = probe.local_addr()?.port();
         drop(probe);
 
-        let rendezvous_url = format!("ws://127.0.0.1:{}", port);
+        let rendezvous_url = format!("wss://127.0.0.1:{}", port);
         let rendezvous = Peer {
             name: "rendezvous".into(),
             dir: rendezvous_dir,
+            identity: rendezvous_identity,
             proc: None,
         };
 
         Ok(E2EVault {
             binary,
             vault_id,
-            vault_key_b64,
             rendezvous_url,
             rendezvous,
             peers: Vec::new(),
+            authorized,
         })
     }
 
-    /// Spawn the rendezvous process for an `E2EVault` created via
-    /// `prepared_offline()`. Errors if the rendezvous is already running.
     pub async fn start_rendezvous(&mut self) -> Result<()> {
         if self.rendezvous.proc.is_some() {
             bail!("rendezvous already running");
         }
         let port = self.rendezvous_port();
-        let mut cmd = base_command(&self.binary, self.rendezvous.dir.path(), &self.vault_key_b64);
+        let mut cmd = base_command(&self.binary, self.rendezvous.dir.path());
         cmd.arg("--listen").arg(format!("127.0.0.1:{}", port));
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -256,14 +276,22 @@ impl E2EVault {
         Ok(())
     }
 
-    /// Spawn a peer without waiting for it to reach the watching state. The
-    /// returned index can be used to address the peer; the caller is
-    /// responsible for waiting on whatever it needs to observe.
+    /// Spawn an authorized peer process without waiting for it to reach
+    /// `watching` — handy for tests that want to observe early-startup
+    /// behavior (e.g. handshake errors). The peer's pubkey is added to
+    /// peers.md before spawning.
     pub async fn add_peer_without_waiting(&mut self, name: &str) -> Result<usize> {
         let dir = TempDir::new()?;
+        let identity = Identity::generate();
+        let id_path = dir.path().join(".agentsync").join("identity");
+        identity
+            .save_to_file(&id_path)
+            .context("write peer identity")?;
+
+        self.authorize_peer(name, &identity.pubkey()).await?;
         write_config(dir.path(), &self.vault_id, Some(&self.rendezvous_url))?;
 
-        let mut cmd = base_command(&self.binary, dir.path(), &self.vault_key_b64);
+        let mut cmd = base_command(&self.binary, dir.path());
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -275,6 +303,37 @@ impl E2EVault {
         self.peers.push(Peer {
             name: name.to_string(),
             dir,
+            identity,
+            proc: Some(child),
+        });
+        Ok(self.peers.len() - 1)
+    }
+
+    /// Spawn a peer whose pubkey is *not* added to peers.md. The returned
+    /// process is expected to fail at handshake time; tests should observe
+    /// its stderr or exit code.
+    pub async fn add_unauthorized_peer(&mut self, name: &str) -> Result<usize> {
+        let dir = TempDir::new()?;
+        let identity = Identity::generate();
+        let id_path = dir.path().join(".agentsync").join("identity");
+        identity
+            .save_to_file(&id_path)
+            .context("write peer identity")?;
+        write_config(dir.path(), &self.vault_id, Some(&self.rendezvous_url))?;
+
+        let mut cmd = base_command(&self.binary, dir.path());
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn unauthorized peer {}", name))?;
+
+        spawn_log_drainer(&mut child, name);
+
+        self.peers.push(Peer {
+            name: name.to_string(),
+            dir,
+            identity,
             proc: Some(child),
         });
         Ok(self.peers.len() - 1)
@@ -297,8 +356,29 @@ impl Peer {
         self.dir.path().join(rel)
     }
 
-    /// Atomic-rename save: write to a `.tmp` sibling, then rename over the
-    /// target. This is the pattern vim/VS Code/etc. use.
+    pub fn pubkey(&self) -> Pubkey {
+        self.identity.pubkey()
+    }
+
+    /// True when the underlying process has exited (or has been reaped).
+    pub async fn is_alive(&mut self) -> bool {
+        match self.proc.as_mut() {
+            Some(c) => c.try_wait().map(|s| s.is_none()).unwrap_or(false),
+            None => false,
+        }
+    }
+
+    pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<std::process::ExitStatus> {
+        let proc = self
+            .proc
+            .as_mut()
+            .ok_or_else(|| anyhow!("peer {} has no live process", self.name))?;
+        let status = tokio::time::timeout(timeout, proc.wait())
+            .await
+            .with_context(|| format!("peer {} did not exit within {:?}", self.name, timeout))??;
+        Ok(status)
+    }
+
     pub fn save_atomic(&self, rel: &str, content: &str) -> Result<()> {
         let final_path = self.abs(rel);
         if let Some(parent) = final_path.parent() {
@@ -316,17 +396,10 @@ impl Peer {
         Ok(())
     }
 
-    /// Truncate-then-write save: open the file with `O_TRUNC`, briefly leave
-    /// it empty, then write the new content. Some editors and tools save this
-    /// way, and it's the pattern that previously caused content loss.
     pub fn save_truncate(&self, rel: &str, content: &str) -> Result<()> {
         self.save_truncate_with_gap(rel, content, Duration::from_millis(40))
     }
 
-    /// Truncate-then-write save with a configurable gap between truncate and
-    /// write. Use this with a `gap` larger than the engine's debounce window
-    /// to exercise the slow-editor case where the empty intermediate state
-    /// has time to fire an inotify event of its own.
     pub fn save_truncate_with_gap(
         &self,
         rel: &str,
@@ -343,7 +416,6 @@ impl Peer {
         Ok(())
     }
 
-    /// Append to a file (create if missing).
     pub fn save_append(&self, rel: &str, extra: &str) -> Result<()> {
         use std::io::Write;
         let final_path = self.abs(rel);
@@ -379,8 +451,6 @@ impl Peer {
         self.abs(rel).exists()
     }
 
-    /// Poll until `rel` on this peer's disk equals `expected`, or `timeout`
-    /// elapses. Returns whatever it last saw on timeout to aid debugging.
     pub async fn wait_for_content(
         &self,
         rel: &str,
@@ -429,6 +499,32 @@ fn short(s: &str) -> String {
     }
 }
 
+async fn bootstrap_rendezvous_storage() -> Result<(TempDir, Identity, String)> {
+    let dir = TempDir::new()?;
+    let storage = dir.path().join(".agentsync");
+    let identity = Identity::generate();
+    // Stash the identity at the per-vault default location.
+    let id_path = storage.join("identity");
+    identity
+        .save_to_file(&id_path)
+        .context("write rendezvous identity")?;
+    let (vault, created) = Vault::create(CreateOptions {
+        rendezvous_url: None,
+        identity: Some(identity.clone()),
+        storage_path: storage.clone(),
+    })
+    .await?;
+    vault.flush().await?;
+    drop(vault);
+    Ok((dir, identity, created.vault_id))
+}
+
+fn write_peers_md(dir: &Path, peers: &[AuthorizedPeer]) -> Result<()> {
+    let body = render_peers_md(peers);
+    std::fs::write(dir.join("peers.md"), body)?;
+    Ok(())
+}
+
 fn write_config(dir: &Path, vault_id: &str, rendezvous_url: Option<&str>) -> Result<()> {
     let agentsync_dir = dir.join(".agentsync");
     std::fs::create_dir_all(&agentsync_dir)?;
@@ -442,9 +538,8 @@ id = "{vault_id}"
     }
     cfg.push_str(
         r#"
-[key]
-source = "env"
-env_var = "AGENTSYNC_KEY"
+[identity]
+path = ".agentsync/identity"
 
 [sync]
 extensions = ["md", "markdown"]
@@ -464,18 +559,14 @@ log_retention_days = 30
     Ok(())
 }
 
-fn base_command(binary: &Path, dir: &Path, key_b64: &str) -> Command {
+fn base_command(binary: &Path, dir: &Path) -> Command {
     let mut cmd = Command::new(binary);
     cmd.current_dir(dir)
-        .env("AGENTSYNC_KEY", key_b64)
-        // Quiet by default; tests can set AGENTSYNC_LOG=debug for diagnostics.
         .env("AGENTSYNC_LOG", std::env::var("AGENTSYNC_LOG").unwrap_or_else(|_| "warn".into()))
         .kill_on_drop(true);
     cmd
 }
 
-/// Read the rendezvous's stdout until we see the "listening on ws://..." line,
-/// then parse the bound port. Cancels after 5s.
 async fn read_listen_port(child: &mut Child) -> Result<u16> {
     let stdout = child.stdout.take().context("rendezvous stdout missing")?;
     let mut reader = BufReader::new(stdout).lines();
@@ -492,8 +583,10 @@ async fn read_listen_port(child: &mut Child) -> Result<u16> {
             Some(l) => l,
             None => bail!("rendezvous exited before printing listen line"),
         };
-        if let Some(rest) = line.strip_prefix("listening on ws://") {
-            // rest looks like "127.0.0.1:49152"
+        if let Some(rest) = line
+            .strip_prefix("listening on ws://")
+            .or_else(|| line.strip_prefix("listening on wss://"))
+        {
             let port_str = rest
                 .rsplit_once(':')
                 .map(|(_, p)| p)
@@ -501,7 +594,6 @@ async fn read_listen_port(child: &mut Child) -> Result<u16> {
             let port: u16 = port_str
                 .parse()
                 .with_context(|| format!("parse port from {}", port_str))?;
-            // Put stdout back so the drainer can finish consuming it.
             let inner = reader.into_inner();
             child.stdout = Some(inner.into_inner());
             return Ok(port);
@@ -585,7 +677,6 @@ fn build_binary() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("cannot locate workspace root"))?
         .to_path_buf();
 
-    // Try existing builds first to avoid rebuilding on every test invocation.
     for profile in ["debug", "release"] {
         let candidate = workspace
             .join("target")
@@ -596,7 +687,6 @@ fn build_binary() -> Result<PathBuf> {
         }
     }
 
-    // Build it. Use `cargo` from PATH; cargo invokes us with PATH set.
     let status = std::process::Command::new(
         std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
     )

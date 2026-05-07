@@ -18,6 +18,11 @@ tracing-subscriber.workspace = true
 tempfile = "3"
 futures-util.workspace = true
 uuid.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
 
 [[test]]
 name = "two_peer_sync"
@@ -54,3 +59,19 @@ path = "tests/graceful_close.rs"
 [[test]]
 name = "reconnect"
 path = "tests/reconnect.rs"
+
+[[test]]
+name = "identity_auth"
+path = "tests/identity_auth.rs"
+
+[[test]]
+name = "wss_channel_binding"
+path = "tests/wss_channel_binding.rs"
+
+[[test]]
+name = "ssh_agent_backend"
+path = "tests/ssh_agent_backend.rs"
+
+[[test]]
+name = "tofu_hub_trust"
+path = "tests/tofu_hub_trust.rs"

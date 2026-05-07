@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         cli::Command::Diff(args) => commands::diff::run(args).await,
         cli::Command::Compact(args) => commands::compact::run(args).await,
         cli::Command::Key(args) => commands::key::run(args).await,
+        cli::Command::Hub(args) => commands::hub::run(args).await,
         cli::Command::Version => {
             println!("agentsync {}", env!("CARGO_PKG_VERSION"));
             Ok(())

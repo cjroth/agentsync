@@ -20,7 +20,7 @@ async fn default_skips_non_markdown_files() {
 
     let (mut vault, _) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: dir.path().join(".agentsync"),
     })
     .await
@@ -32,7 +32,10 @@ async fn default_skips_non_markdown_files() {
     // Allow the periodic materializer to settle.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let paths = vault.list_file_paths().await.unwrap();
+    let mut paths = vault.list_file_paths().await.unwrap();
+    paths.sort();
+    // peers.md is auto-seeded by `Vault::create`; ignore it for this assert.
+    paths.retain(|p| p != "peers.md");
     assert_eq!(paths, vec!["note.md".to_string()]);
 }
 
@@ -48,7 +51,7 @@ async fn extending_text_extensions_opts_in_more_files() {
 
     let (mut vault, _) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: dir.path().join(".agentsync"),
     })
     .await
@@ -58,6 +61,7 @@ async fn extending_text_extensions_opts_in_more_files() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut paths = vault.list_file_paths().await.unwrap();
+    paths.retain(|p| p != "peers.md");
     paths.sort();
     assert_eq!(
         paths,
@@ -82,7 +86,7 @@ async fn explicit_size_limit_is_respected() {
 
     let (mut vault, _) = Vault::create(CreateOptions {
         rendezvous_url: None,
-        vault_key: None,
+        identity: None,
         storage_path: dir.path().join(".agentsync"),
     })
     .await
@@ -92,6 +96,8 @@ async fn explicit_size_limit_is_respected() {
     let _ = vault.bind_directory(dir.path(), opts).await.unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let paths = vault.list_file_paths().await.unwrap();
+    let mut paths = vault.list_file_paths().await.unwrap();
+    paths.retain(|p| p != "peers.md");
+    paths.sort();
     assert_eq!(paths, vec!["ok.md".to_string()]);
 }

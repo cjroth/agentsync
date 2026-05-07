@@ -8,6 +8,7 @@ pub mod snapshot;
 pub mod diff;
 pub mod compact;
 pub mod key;
+pub mod hub;
 
 use std::path::Path;
 
