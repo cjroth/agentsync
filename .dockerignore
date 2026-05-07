@@ -1,0 +1,11 @@
+target
+.git
+.github
+.gitignore
+specs
+demo*
+README.md
+AGENTS.md
+fly.toml
+Dockerfile
+.dockerignore

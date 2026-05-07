@@ -11,7 +11,7 @@ name = "agentsync"
 path = "src/main.rs"
 
 [dependencies]
-agentsync-core = { path = "../agentsync-core" }
+agentsync-core = { path = "../agentsync-core", version = "0.1.0" }
 tokio.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
