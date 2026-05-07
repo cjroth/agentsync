@@ -47,19 +47,63 @@ pub fn encode_key(key: &VaultKey) -> String {
 }
 
 pub fn decode_key(s: &str) -> Result<VaultKey> {
+    let trimmed = s.trim();
+    if looks_like_uuid(trimmed) {
+        return Err(Error::Auth(format!(
+            "expected base64-encoded {}-byte vault key (~{} chars), got a UUID. \
+             Did you confuse vault_id and vault_key? \
+             Use the `vault_key` value from `agentsync init`, not `vault_id`.",
+            VAULT_KEY_LEN,
+            base64_len_no_pad(VAULT_KEY_LEN),
+        )));
+    }
     let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(s.trim())
-        .map_err(|e| Error::Auth(format!("invalid base64 key: {}", e)))?;
+        .decode(trimmed)
+        .map_err(|e| {
+            Error::Auth(format!(
+                "invalid vault key: expected base64-encoded {}-byte key (~{} chars). \
+                 Pass the `vault_key` value from `agentsync init`. \
+                 (decoder error: {})",
+                VAULT_KEY_LEN,
+                base64_len_no_pad(VAULT_KEY_LEN),
+                e
+            ))
+        })?;
     if bytes.len() != VAULT_KEY_LEN {
         return Err(Error::Auth(format!(
-            "expected {}-byte key, got {}",
+            "vault key has wrong length: expected {} bytes (~{} base64 chars), got {} bytes. \
+             Pass the `vault_key` value from `agentsync init`.",
             VAULT_KEY_LEN,
+            base64_len_no_pad(VAULT_KEY_LEN),
             bytes.len()
         )));
     }
     let mut out = [0u8; VAULT_KEY_LEN];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+fn looks_like_uuid(s: &str) -> bool {
+    // 8-4-4-4-12 hex with hyphens.
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, &c) in b.iter().enumerate() {
+        let is_hyphen = matches!(i, 8 | 13 | 18 | 23);
+        if is_hyphen {
+            if c != b'-' {
+                return false;
+            }
+        } else if !c.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+const fn base64_len_no_pad(n: usize) -> usize {
+    (n * 4 + 2) / 3
 }
 
 #[cfg(test)]

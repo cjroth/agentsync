@@ -68,7 +68,8 @@ pub struct CloneArgs {
     /// Rendezvous WebSocket URL (e.g. ws://host:port).
     #[arg(long)]
     pub rendezvous: String,
-    /// Vault key (base64). Omit to read from $AGENTSYNC_KEY.
+    /// Vault key — the base64 `vault_key` value printed by `agentsync init`
+    /// (not the `vault_id` UUID). Omit to read from $AGENTSYNC_KEY.
     #[arg(long)]
     pub key: Option<String>,
     /// Optional vault id. If omitted, discovered from the server during

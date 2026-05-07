@@ -4,6 +4,15 @@ use agentsync_core::{decode_key, discover_vault_id, OpenOptions, Vault};
 use anyhow::{Context, Result};
 
 pub async fn run(args: CloneArgs) -> Result<()> {
+    // Validate the key first — before creating directories — so a bad key
+    // doesn't leave behind an empty target folder.
+    let key_b64 = args
+        .key
+        .clone()
+        .or_else(|| std::env::var("AGENTSYNC_KEY").ok())
+        .context("--key not provided and AGENTSYNC_KEY env var not set")?;
+    let key = decode_key(&key_b64)?;
+
     let target = args.local_path.clone();
     if target.exists() && std::fs::read_dir(&target)?.next().is_some() {
         anyhow::bail!("clone target {} is not empty", target.display());
@@ -11,13 +20,6 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     std::fs::create_dir_all(&target)?;
     let target = target.canonicalize()?;
     let storage = target.join(".agentsync");
-
-    let key_b64 = args
-        .key
-        .clone()
-        .or_else(|| std::env::var("AGENTSYNC_KEY").ok())
-        .context("--key not provided and AGENTSYNC_KEY env var not set")?;
-    let key = decode_key(&key_b64)?;
 
     // Discover the vault_id from the server if the user didn't pass one.
     // This is the option-1 UX: the rendezvous URL + key is all the user needs.
