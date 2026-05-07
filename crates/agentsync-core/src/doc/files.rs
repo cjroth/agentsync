@@ -154,7 +154,7 @@ impl Doc {
             self.inner.put(&meta, "updated_at", now)?;
             self.inner.put(&meta, "kind", FileKind::Text.as_str())?;
             self.inner.delete(&meta, "deleted_at")?;
-            self.inner.commit();
+            self.commit_now();
             return Ok(fid);
         }
 
@@ -172,7 +172,7 @@ impl Doc {
             self.inner.splice_text(&text_id, 0, 0, content)?;
         }
         self.ensure_ancestor_directories(&path)?;
-        self.inner.commit();
+        self.commit_now();
         Ok(fid)
     }
 
@@ -189,7 +189,7 @@ impl Doc {
             self.inner.put(&meta, "size", size)?;
             self.inner.put(&meta, "updated_at", now)?;
             self.inner.delete(&meta, "deleted_at")?;
-            self.inner.commit();
+            self.commit_now();
             return Ok(fid);
         }
 
@@ -204,7 +204,7 @@ impl Doc {
         self.inner.put(&meta, "updated_at", now)?;
         self.inner.put(&entry, "binary_hash", hash)?;
         self.ensure_ancestor_directories(&path)?;
-        self.inner.commit();
+        self.commit_now();
         Ok(fid)
     }
 
@@ -217,7 +217,7 @@ impl Doc {
         let entry = get_object(&mut self.inner, &files, &fid)?.unwrap();
         let meta = get_object(&mut self.inner, &entry, "meta")?.unwrap();
         self.inner.put(&meta, "deleted_at", now_ms())?;
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 
@@ -239,7 +239,7 @@ impl Doc {
         self.inner.put(&meta, "path", to.as_str())?;
         self.inner.put(&meta, "updated_at", now_ms())?;
         self.ensure_ancestor_directories(&to)?;
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 }

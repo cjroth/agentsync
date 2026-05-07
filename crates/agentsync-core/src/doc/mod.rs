@@ -18,6 +18,7 @@ use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
     ActorId, AutoCommit, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
 };
+use automerge::ReadDocAt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -191,6 +192,17 @@ pub(crate) fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+impl Doc {
+    /// Commit the current transaction stamping it with wall-clock time.
+    /// The default `AutoCommit::commit()` records `time = None` (serialized
+    /// as 0) which makes time-based history queries (`restore-at`) useless,
+    /// so all schema mutators in this crate go through here.
+    pub(crate) fn commit_now(&mut self) {
+        self.inner
+            .commit_with(CommitOptions::default().with_time(now_ms()));
+    }
 }
 
 pub(crate) fn new_id() -> String {

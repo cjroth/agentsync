@@ -64,6 +64,7 @@ version = "0.1.0"
 dependencies = [
  "agentsync-core",
  "anyhow",
+ "automerge",
  "futures-util",
  "tempfile",
  "tokio",

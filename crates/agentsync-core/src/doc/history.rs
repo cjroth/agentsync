@@ -14,14 +14,14 @@ impl Doc {
         let entry = self.inner.put_object(&labels, label, ObjType::Map)?;
         self.inner.put(&entry, "heads", ScalarValue::Bytes(encoded))?;
         self.inner.put(&entry, "created_at", now_ms())?;
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 
     pub fn delete_label(&mut self, label: &str) -> Result<()> {
         let labels = self.labels_obj()?;
         self.inner.delete(&labels, label)?;
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 
@@ -216,7 +216,7 @@ impl Doc {
             self.inner.delete(&meta, "deleted_at")?;
         }
 
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 
@@ -244,6 +244,17 @@ impl Doc {
             }
         }
         Ok(heads.into_iter().collect())
+    }
+
+    /// Diagnostic: list every change in the document with its timestamp and
+    /// dep hashes. Used by tests/repros that need to reason about history shape.
+    #[doc(hidden)]
+    pub fn debug_changes(&mut self) -> Vec<(ChangeHash, i64, Vec<ChangeHash>)> {
+        self.inner
+            .get_changes(&[])
+            .into_iter()
+            .map(|c| (c.hash(), c.timestamp(), c.deps().to_vec()))
+            .collect()
     }
 
     pub fn read_file_id(&mut self, fid: &str) -> Result<Option<String>> {

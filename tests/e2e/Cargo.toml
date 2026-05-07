@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 agentsync-core = { path = "../../crates/agentsync-core" }
+automerge.workspace = true
 tokio = { workspace = true, features = ["full", "process"] }
 anyhow.workspace = true
 tracing.workspace = true

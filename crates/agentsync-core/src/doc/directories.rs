@@ -43,7 +43,7 @@ impl Doc {
         self.inner.put(&meta, "path", path.as_str())?;
         self.inner.put(&meta, "created_at", now_ms())?;
         self.ensure_ancestor_directories(&path)?;
-        self.inner.commit();
+        self.commit_now();
         Ok(did)
     }
 
@@ -116,7 +116,7 @@ impl Doc {
                 self.inner.put(&meta, "deleted_at", now)?;
             }
         }
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 
@@ -185,7 +185,7 @@ impl Doc {
             }
         }
         self.ensure_ancestor_directories(&to)?;
-        self.inner.commit();
+        self.commit_now();
         Ok(())
     }
 
