@@ -16,21 +16,24 @@ pub mod mock_agent;
 pub use harness::{E2EVault, Peer};
 pub use mock_agent::MockAgent;
 
-use agentsync_core::{Pubkey, Vault};
+use agentsync_core::{Pubkey, Vault, AUTHORIZED_KEYS_FILE};
 
-/// Append a peer's pubkey to the in-memory peers.md of an in-process vault.
-/// Used by the in-process integration tests that don't go through the CLI
-/// harness — those that do should call [`E2EVault::authorize_peer`] instead.
+/// Append a peer's pubkey to the in-memory `authorized_keys` of an in-process
+/// vault. Used by the in-process integration tests that don't go through the
+/// CLI harness — those that do should call [`E2EVault::authorize_peer`].
 pub async fn authorize_in_process(vault: &Vault, label: &str, pk: &Pubkey) {
-    let cur = vault.read_text_file("peers.md").await.unwrap_or_default();
-    let line = format!("- `{}` — {}\n", pk.to_ssh_string(), label);
+    let cur = vault
+        .read_text_file(AUTHORIZED_KEYS_FILE)
+        .await
+        .unwrap_or_default();
+    let line = format!("{} {}\n", pk.to_ssh_string(), label);
     let updated = if cur.ends_with('\n') || cur.is_empty() {
         format!("{}{}", cur, line)
     } else {
         format!("{}\n{}", cur, line)
     };
     vault
-        .write_text_file("peers.md", &updated)
+        .write_text_file(AUTHORIZED_KEYS_FILE, &updated)
         .await
-        .expect("write peers.md");
+        .expect("write authorized_keys");
 }

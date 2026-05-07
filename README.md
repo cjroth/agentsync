@@ -3,17 +3,24 @@
 Real-time distributed agent memory: sync folders of markdown files between devices with point-in-time-recovery.
 
 ```sh
-# Machine 1
+# Machine 1 — the hub
 agentsync init
-# Prints `vault_key = <base64>` — copy that.
-export AGENTSYNC_KEY="<key-from-init>"
-agentsync --listen 0.0.0.0:1234
+# Prints this device's pubkey, e.g.
+#   identity_pub  = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+agentsync --listen
+# Prints "listening on wss://0.0.0.0:1234"
 ```
 
 ```sh
-# Machine 2
-export AGENTSYNC_KEY="<same-key-from-machine-1>"
-agentsync clone cloned-folder --rendezvous ws://machine-1:1234
+# Machine 2 — a peer
+agentsync key generate
+# Prints this device's pubkey. Paste it into authorized_keys on Machine 1
+# (or any device that already has the vault) and let it sync.
+
+agentsync clone cloned-folder --rendezvous wss://machine-1
+# Default port is 1234, so :1234 is optional in the URL.
+# On first connect you'll be prompted to confirm Machine 1's identity (TOFU).
+# Pass --accept-hub-key <pubkey> to skip the prompt in scripts.
 ```
 
 By default only `.md` and `.markdown` files sync; edit `[sync] extensions` in
@@ -24,11 +31,67 @@ By default only `.md` and `.markdown` files sync; edit `[sync] extensions` in
 * Wasm support for TypeScript use cases is planned
 * Built on Automerge which uses CRDTs to prevent merge conflicts
 * Tag snapshots to easily go back to any point in time
-* Auth is a single 32-byte shared key (base64-encoded)
+* Per-device ed25519 identities; authorization via a synced `authorized_keys` file (SSH-style)
 * Zero infrastructure required
-* Plaintext `ws://` only in this build — TLS via a fronting proxy or v2
+* WSS with self-signed certs and channel-bound auth — no public CA needed
+* ssh-agent backend supported for hardware-backed keys (Secretive, 1Password, ssh-agent, YubiKey-Agent)
+* TOFU hub trust pinned per-vault in `config.toml`
 
-**Status:** alpha. See [`SPEC.md`](./SPEC.md) for the full product spec.
+**Status:** alpha. See [`SPEC.md`](./SPEC.md) for the product spec and [`AUTH.md`](./AUTH.md) for the auth design.
+
+## Authentication model
+
+Each device has its own ed25519 keypair. The hub (the `--listen` peer) gates
+connections by checking the connecting peer's pubkey against `authorized_keys`,
+an SSH-style file at the root of the synced vault that lists authorized devices:
+
+```
+# agentsync authorized_keys
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... chris-macbook
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... chris-iphone
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... homelab-nas
+```
+
+`authorized_keys` is itself synced through agentsync, so removing a device
+from any peer's copy disconnects them within one sync round. The line format
+is identical to `~/.ssh/authorized_keys`, so you can paste OpenSSH pubkey
+output directly.
+
+By default the local identity lives at `~/.agentsync/id_ed25519` (shared
+across all of this user's vaults, like `~/.ssh/id_ed25519`). Pass
+`--identity <path>` on `init` / `clone` / `key generate` to override.
+
+The wire is encrypted via WSS with a self-signed cert that the hub
+auto-generates on first launch. Trust isn't established at the TLS layer —
+clients accept any cert — but the application-layer signature in the
+handshake binds to the cert fingerprint, so an active MITM that re-encrypts
+to the real listener is detected and refused.
+
+To add a new device:
+
+1. On the new device, run `agentsync key generate` (or `agentsync init` for
+   a fresh vault). Copy the printed `ssh-ed25519 ...` line.
+2. On any device that already has the vault, append it as a new line in
+   `authorized_keys`. The hub picks up the change via its file watcher
+   and logs `peer added to authorized_keys`.
+3. The new device can now connect.
+
+To use a hardware-backed identity (Secretive, 1Password's ssh-agent,
+gpg-agent, YubiKey-Agent), point agentsync at the agent socket:
+
+```sh
+agentsync watch \
+  --identity-agent /path/to/agent.sock \
+  --identity-agent-pubkey "ssh-ed25519 AAAA..."
+```
+
+Or persist the choice in `.agentsync/config.toml`:
+
+```toml
+[identity]
+agent_socket = "/path/to/agent.sock"
+agent_pubkey = "ssh-ed25519 AAAA..."
+```
 
 ## Workspace layout
 
@@ -39,6 +102,7 @@ crates/
 tests/
   e2e/                # multi-peer end-to-end tests against the real binary
 SPEC.md               # product spec
+AUTH.md               # auth design
 ```
 
 ## Build
@@ -54,16 +118,18 @@ Requires Rust 1.89+.
 
 | Command | Description |
 | --- | --- |
-| `agentsync init` | Initialize a vault in the current directory. |
+| `agentsync init` | Initialize a vault. Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` (skip with `--no-ignore-files`). |
 | `agentsync watch [path]` | Watch and sync a directory (default when no subcommand given). |
-| `agentsync clone <path> --rendezvous URL [--vault-id ID]` | Clone an existing vault to a local directory. `--vault-id` is optional; the server returns it during the handshake if omitted. |
-| `agentsync status` | Print connection state and counts. |
+| `agentsync clone <path> --rendezvous URL [--vault-id ID] [--accept-hub-key PK]` | Clone an existing vault. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. URL port defaults to 1234 if omitted. |
+| `agentsync status` | Print connection state, vault id, and local pubkey. |
 | `agentsync push` / `pull` | One-shot sync. |
-| `agentsync restore-at <timestamp>` | Restore the vault to a wall-clock moment (RFC3339 or epoch ms). |
+| `agentsync restore-at <when>` | Restore to a point in time. Accepts epoch ms or relative offsets like `5m`, `2h`, `1d`, `1w`. |
 | `agentsync snapshot create/list/restore/delete` | Manage named recovery points. |
 | `agentsync diff <from> [to]` | Show changes between two points in history. |
 | `agentsync compact` | Run a compaction pass. |
-| `agentsync key generate/show/store` | Manage vault keys. |
+| `agentsync key generate/show` | Generate this device's identity, or print its pubkey for pasting into someone else's `authorized_keys`. |
+| `agentsync hub trust <pubkey>` / `forget` / `show` | Manage the pinned hub identity (`[vault] hub_pubkey`). |
+| `agentsync completions <shell>` | Emit a shell-completion script. Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`. |
 
 `agentsync --help` for full flags.
 
@@ -74,15 +140,28 @@ agentsync state lives next to your files in `.agentsync/`:
 ```
 my-vault/
 ├── notes/                       ← your files, plain on disk
+├── authorized_keys              ← authorized device pubkeys (synced, SSH-style)
 ├── README.md
-└── .agentsync/                  ← managed by the CLI
-    ├── config.toml              ← vault id, rendezvous url, key source
-    ├── doc.bin                  ← saved Automerge document (full history)
-    ├── snapshots/index.json     ← named labels → heads
-    ├── blobs/<sha256>           ← binary attachments
+├── .gitignore                   ← seeded by `init` to ignore .agentsync/
+├── .agentsignore                ← same, for agentsync's own ingest filter
+├── .agentsync/                  ← per-vault state, managed by the CLI
+│   ├── config.toml              ← vault id, rendezvous url, identity path, hub_pubkey
+│   ├── doc.bin                  ← saved Automerge document (full history)
+│   ├── snapshots/index.json     ← named labels → heads
+│   └── blobs/<sha256>           ← binary attachments
+└── .agentsync-server/           ← only on a `--listen` peer
+    ├── tls.crt                  ← self-signed cert (10-year, ed25519)
+    └── tls.key                  ← private key for the cert (mode 0600)
+
+~/.agentsync/                    ← shared across this user's vaults
+├── id_ed25519                   ← ed25519 secret seed (mode 0600)
+└── id_ed25519.pub               ← matching ssh-ed25519 pubkey
 ```
 
-Back up `.agentsync/` with any tool you like (restic, borgbackup, rclone) — it contains the full document history.
+Back up `.agentsync/` with any tool you like (restic, borgbackup, rclone) — it
+contains the full document history. `.agentsync-server/` only matters if this
+device runs `--listen`; deleting it just regenerates the cert (existing peers
+will need to re-pin the new fingerprint).
 
 ## Testing
 
@@ -93,8 +172,10 @@ cargo test -p agentsync-e2e       # multi-peer end-to-end tests only
 ```
 
 E2E tests spawn the real `agentsync` binary in temp directories and exercise
-sync over real WebSocket connections. Per the spec: if a feature isn't
-covered by an E2E test, it doesn't ship.
+sync over real WSS connections, including the four-message handshake, the
+ssh-agent signing path (via an in-process mock agent), and an active-MITM
+relay test that verifies channel binding refuses tampered connections. Per
+the spec: if a feature isn't covered by an E2E test, it doesn't ship.
 
 ## License
 

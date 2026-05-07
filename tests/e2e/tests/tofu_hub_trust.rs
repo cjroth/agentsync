@@ -34,8 +34,8 @@ async fn accept_hub_key_pins_in_config() {
     let binary = locate_binary();
 
     let id = Identity::generate();
-    let id_path = target_path.join(".agentsync").join("identity");
-    std::fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+    let id_dir = tempfile::TempDir::new().unwrap();
+    let id_path = id_dir.path().join("id");
     id.save_to_file(&id_path).unwrap();
     v.authorize_peer("cloner", &id.pubkey()).await.unwrap();
 
@@ -47,6 +47,8 @@ async fn accept_hub_key_pins_in_config() {
         .arg(&v.rendezvous_url)
         .arg("--accept-hub-key")
         .arg(&hub_pubkey)
+        .arg("--identity")
+        .arg(&id_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)

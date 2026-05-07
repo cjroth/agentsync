@@ -7,7 +7,8 @@ use crate::identity::{Identity, Pubkey};
 use crate::net::client::ClientConn;
 use crate::net::protocol::Frame;
 use crate::net::server::Server;
-use crate::peers_md::{parse_peers_md, render_peers_md, AuthorizedPeer, PEERS_FILE};
+use crate::constants::AUTHORIZED_KEYS_FILE;
+use crate::peers_md::{parse_authorized_keys, render_authorized_keys, AuthorizedPeer};
 use crate::store::{BlobStore, DocStore, SnapshotIndex};
 use async_trait::async_trait;
 use automerge::sync::{self as amsync, SyncDoc};
@@ -220,13 +221,13 @@ pub struct PeerSlot {
     pub state: amsync::State,
     pub out: mpsc::UnboundedSender<Frame>,
     /// Set during the handshake; used by the server's authorization enforcer
-    /// to find peers no longer in `peers.md`.
+    /// to find peers no longer in `authorized_keys`.
     pub pubkey: Option<Pubkey>,
 }
 
 impl Vault {
     /// Create a brand-new vault on disk. Generates vault_id and identity if absent.
-    /// Also seeds `peers.md` with the creator's pubkey so they can connect to
+    /// Also seeds `authorized_keys` with the creator's pubkey so they can connect to
     /// their own listener immediately.
     pub async fn create(opts: CreateOptions) -> Result<(Self, CreatedVault)> {
         let storage = opts.storage_path.clone();
@@ -247,14 +248,14 @@ impl Vault {
             )));
         }
         let mut doc = Doc::new(&vault_id)?;
-        // Seed peers.md so the creator's own pubkey is authorized — otherwise
+        // Seed authorized_keys so the creator's own pubkey is authorized — otherwise
         // every later connection (including their own listener accepting their
         // own client) would be rejected.
-        let seed = render_peers_md(&[AuthorizedPeer {
+        let seed = render_authorized_keys(&[AuthorizedPeer {
             pubkey: identity.pubkey(),
             label: "creator".into(),
         }]);
-        doc.write_text_file(PEERS_FILE, &seed)?;
+        doc.write_text_file(AUTHORIZED_KEYS_FILE, &seed)?;
         doc_store.save(&mut doc).await?;
 
         let inner = Arc::new(VaultInner {
@@ -744,15 +745,15 @@ impl Vault {
         self.inner.peers.lock().await.len()
     }
 
-    /// Read & parse `peers.md` from the synced doc. Empty list if the file is
+    /// Read & parse `authorized_keys` from the synced doc. Empty list if the file is
     /// missing or unparseable.
     pub async fn authorized_pubkeys(&self) -> Vec<Pubkey> {
         let mut doc = self.inner.doc.lock().await;
-        let content = match doc.read_file(PEERS_FILE) {
+        let content = match doc.read_file(AUTHORIZED_KEYS_FILE) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        parse_peers_md(&content)
+        parse_authorized_keys(&content)
             .into_iter()
             .map(|p| p.pubkey)
             .collect()
@@ -772,9 +773,22 @@ pub trait SyncHandle: Send + Sync {
     async fn read_blob(&self, hash: &str) -> Result<Vec<u8>>;
     async fn write_blob(&self, hash: &str, bytes: &[u8]) -> Result<()>;
     async fn wait_doc_changed(&self);
-    /// Latest list of authorized peer pubkeys, as parsed from `peers.md` in
+    /// Latest list of authorized peer pubkeys, as parsed from `authorized_keys` in
     /// the synced doc.
     async fn authorized_pubkeys(&self) -> Vec<Pubkey>;
+    /// Latest authorized peers including labels. Used by the enforcer to
+    /// log human-readable peer-add/remove notices. Default impl adapts
+    /// [`Self::authorized_pubkeys`] with empty labels.
+    async fn authorized_peers(&self) -> Vec<AuthorizedPeer> {
+        self.authorized_pubkeys()
+            .await
+            .into_iter()
+            .map(|pk| AuthorizedPeer {
+                pubkey: pk,
+                label: String::new(),
+            })
+            .collect()
+    }
     /// Drop the outbound channel for any connected peer whose pubkey is not
     /// in `authorized`. The peer's writer task observes the channel close and
     /// shuts down the websocket gracefully.
@@ -827,7 +841,14 @@ impl SyncHandle for VaultSyncHandle {
         let mut peers = self.inner.peers.lock().await;
         let slot = match peers.get_mut(&peer_id) {
             Some(s) => s,
-            None => return Err(Error::Protocol(format!("unknown peer {}", peer_id))),
+            // Late sync message for a peer we just disconnected (e.g. it
+            // was deauthorized via authorized_keys). Silently drop — the
+            // disconnect was logged separately, and treating this as an
+            // error produces confusing "unknown peer N" warnings.
+            None => {
+                tracing::debug!(peer_id, "ignoring sync message for disconnected peer");
+                return Ok(());
+            }
         };
         let before;
         let after;
@@ -858,30 +879,43 @@ impl SyncHandle for VaultSyncHandle {
     }
     async fn authorized_pubkeys(&self) -> Vec<Pubkey> {
         let mut doc = self.inner.doc.lock().await;
-        let content = match doc.read_file(PEERS_FILE) {
+        let content = match doc.read_file(AUTHORIZED_KEYS_FILE) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        parse_peers_md(&content)
+        parse_authorized_keys(&content)
             .into_iter()
             .map(|p| p.pubkey)
             .collect()
     }
+    async fn authorized_peers(&self) -> Vec<AuthorizedPeer> {
+        let mut doc = self.inner.doc.lock().await;
+        let content = match doc.read_file(AUTHORIZED_KEYS_FILE) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        parse_authorized_keys(&content)
+    }
     async fn disconnect_unauthorized_peers(&self, authorized: &[Pubkey]) {
         let mut peers = self.inner.peers.lock().await;
-        let to_drop: Vec<u64> = peers
+        let to_drop: Vec<(u64, Option<Pubkey>)> = peers
             .iter()
             .filter_map(|(id, slot)| match slot.pubkey {
-                Some(pk) if !authorized.contains(&pk) => Some(*id),
+                Some(pk) if !authorized.contains(&pk) => Some((*id, Some(pk))),
                 _ => None,
             })
             .collect();
-        for id in to_drop {
+        for (id, pk) in to_drop {
             if let Some(slot) = peers.remove(&id) {
-                // Closing the channel makes the peer's writer task exit and
-                // tear down the websocket; the reader+notif tasks follow.
                 drop(slot);
-                debug!(peer_id = id, "dropping unauthorized peer");
+                match pk {
+                    Some(pk) => info!(
+                        peer_id = id,
+                        fp = %pk.fingerprint_sha256(),
+                        "disconnecting peer (no longer in authorized_keys)",
+                    ),
+                    None => info!(peer_id = id, "disconnecting unidentified peer"),
+                }
             }
         }
     }

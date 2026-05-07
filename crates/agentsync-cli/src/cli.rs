@@ -1,8 +1,7 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-/// Address used when `--listen` is given without a value.
-pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1234";
+pub use agentsync_core::DEFAULT_LISTEN_ADDR;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentsync", version, about = "Real-time directory sync engine")]
@@ -38,8 +37,27 @@ pub enum Command {
     Key(KeyArgs),
     /// Manage the pinned hub identity (`hub_pubkey`).
     Hub(HubArgs),
+    /// Generate shell completions for tab-completing subcommands and flags.
+    /// Pipe the output into your shell's completions directory, e.g.
+    /// `agentsync completions bash > /etc/bash_completion.d/agentsync`.
+    Completions(CompletionsArgs),
     /// Print version.
     Version,
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Shell to emit completions for.
+    pub shell: ShellKind,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
+    PowerShell,
+    Elvish,
 }
 
 #[derive(Debug, Args)]
@@ -74,10 +92,16 @@ pub enum HubOp {
 pub struct InitArgs {
     #[arg(long)]
     pub rendezvous: Option<String>,
-    /// Override the identity-secret path. Defaults to `.agentsync/identity`
-    /// (per-vault). Pass an absolute path to share an identity across vaults.
+    /// Override the identity-secret path. Defaults to
+    /// `~/.agentsync/id_ed25519` (shared across vaults, like
+    /// `~/.ssh/id_ed25519`).
     #[arg(long)]
     pub identity: Option<PathBuf>,
+    /// Skip creating / updating `.gitignore` and `.agentsignore`. By default
+    /// `init` ensures both contain `.agentsync/` so the per-vault state
+    /// directory isn't accidentally committed or re-synced.
+    #[arg(long)]
+    pub no_ignore_files: bool,
     #[arg(long, default_value = ".")]
     pub path: PathBuf,
 }
@@ -115,8 +139,9 @@ pub struct CloneArgs {
     #[arg(long)]
     pub rendezvous: String,
     /// Path for the local identity secret. Defaults to
-    /// `<local_path>/.agentsync/identity`. If the file already exists, it's
-    /// reused; otherwise a fresh ed25519 keypair is generated.
+    /// `~/.agentsync/id_ed25519` (shared across vaults). If the file
+    /// already exists, it's reused; otherwise a fresh ed25519 keypair is
+    /// generated.
     #[arg(long)]
     pub identity: Option<PathBuf>,
     /// Optional vault id. If omitted, discovered from the server during
@@ -205,12 +230,13 @@ pub enum KeyOp {
     Generate {
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Override the identity-secret path (default: `.agentsync/identity`).
+        /// Override the identity-secret path (default:
+        /// `~/.agentsync/id_ed25519`).
         #[arg(long)]
         identity: Option<PathBuf>,
     },
     /// Print the local pubkey in `ssh-ed25519 ...` format, suitable for
-    /// pasting into someone else's peers.md.
+    /// pasting into someone else's authorized_keys.
     Show {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -230,6 +256,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "compact",
     "key",
     "hub",
+    "completions",
     "version",
     "help",
 ];

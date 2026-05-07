@@ -37,7 +37,7 @@ async fn tls_connect(url: &str) -> Result<(TlsStream<TcpStream>, [u8; 32], Strin
         .host_str()
         .ok_or_else(|| Error::Network("url missing host".into()))?
         .to_string();
-    let port = parsed.port().unwrap_or(443);
+    let port = parsed.port().unwrap_or(crate::constants::DEFAULT_PORT);
     let tcp = TcpStream::connect((host.as_str(), port)).await?;
 
     let connector = TlsConnector::from(client_config_accept_any());

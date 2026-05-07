@@ -3,10 +3,11 @@ use crate::config::{
     identity_path, write, ConfigFile, IdentitySection, SyncSection, VaultSection,
 };
 use agentsync_core::net::client::ClientConn;
-use agentsync_core::{Identity, OpenOptions, Pubkey, Vault};
+use agentsync_core::{normalize_rendezvous_url, Identity, OpenOptions, Pubkey, Vault};
 use anyhow::{Context, Result};
 
 pub async fn run(args: CloneArgs) -> Result<()> {
+    let rendezvous = normalize_rendezvous_url(&args.rendezvous);
     let target = args.local_path.clone();
     if target.exists() {
         let has_other = std::fs::read_dir(&target)?
@@ -30,7 +31,7 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     let mut cfg = ConfigFile {
         vault: VaultSection {
             id: None,
-            rendezvous_url: Some(args.rendezvous.clone()),
+            rendezvous_url: Some(rendezvous.clone()),
             hub_pubkey: pre_accepted.as_ref().map(|p| p.to_ssh_string()),
         },
         identity: IdentitySection {
@@ -58,7 +59,7 @@ pub async fn run(args: CloneArgs) -> Result<()> {
         identity.pubkey().to_ssh_string()
     );
     println!(
-        "(this device must be authorized in the vault's peers.md before clone can proceed)"
+        "(this device must be authorized in the vault's authorized_keys before clone can proceed)"
     );
 
     // Open the vault locally, then run the actual connect through ClientConn
@@ -72,14 +73,14 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     let probe_handle: std::sync::Arc<dyn agentsync_core::SyncHandle> =
         std::sync::Arc::new(NoopSyncHandle::default());
     let conn = ClientConn::connect(
-        &args.rendezvous,
+        &rendezvous,
         vault_id_pre.clone(),
         pre_accepted,
         identity.clone(),
         probe_handle,
     )
     .await
-    .with_context(|| format!("connect to rendezvous {}", args.rendezvous))?;
+    .with_context(|| format!("connect to rendezvous {}", rendezvous))?;
     let hub_pubkey = conn.hub_pubkey;
     let vault_id = conn.vault_id.clone();
     conn.close().await;
@@ -89,7 +90,7 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     let accepted_hub = if pre_accepted.is_some() {
         pre_accepted.unwrap()
     } else {
-        prompt_trust(&args.rendezvous, &hub_pubkey)?;
+        prompt_trust(&rendezvous, &hub_pubkey)?;
         hub_pubkey
     };
 
@@ -100,7 +101,7 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     println!("pinned hub: {}", accepted_hub.fingerprint_sha256());
 
     let opts = OpenOptions {
-        rendezvous_url: Some(args.rendezvous.clone()),
+        rendezvous_url: Some(rendezvous.clone()),
         vault_id,
         identity,
         storage_path: storage,
@@ -111,7 +112,7 @@ pub async fn run(args: CloneArgs) -> Result<()> {
     if let Err(e) = vault.connect().await {
         anyhow::bail!("connect to rendezvous failed: {}", e);
     }
-    println!("connected to {}", args.rendezvous);
+    println!("connected to {}", rendezvous);
     println!("syncing into {} — Ctrl-C to stop.", target.display());
     tokio::signal::ctrl_c().await?;
     vault.flush().await?;

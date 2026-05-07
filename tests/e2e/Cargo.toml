@@ -75,3 +75,31 @@ path = "tests/ssh_agent_backend.rs"
 [[test]]
 name = "tofu_hub_trust"
 path = "tests/tofu_hub_trust.rs"
+
+[[test]]
+name = "default_port"
+path = "tests/default_port.rs"
+
+[[test]]
+name = "restore_relative_time"
+path = "tests/restore_relative_time.rs"
+
+[[test]]
+name = "authorized_keys_file"
+path = "tests/authorized_keys_file.rs"
+
+[[test]]
+name = "home_identity"
+path = "tests/home_identity.rs"
+
+[[test]]
+name = "init_ignore_files"
+path = "tests/init_ignore_files.rs"
+
+[[test]]
+name = "completions"
+path = "tests/completions.rs"
+
+[[test]]
+name = "peer_change_logging"
+path = "tests/peer_change_logging.rs"

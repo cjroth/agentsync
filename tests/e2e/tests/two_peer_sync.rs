@@ -184,7 +184,7 @@ async fn concurrent_edits_converge() {
     assert!(converged, "peers did not converge on collab.md");
 }
 
-/// A peer whose pubkey is *not* in peers.md must be rejected at handshake
+/// A peer whose pubkey is *not* in authorized_keys must be rejected at handshake
 /// time — the listener closes the connection before any sync flows.
 #[tokio::test]
 async fn unauthorized_peer_is_rejected() {

@@ -1,3 +1,4 @@
+use crate::constants::AUTHORIZED_KEYS_FILE;
 use crate::fs::adapter::{FilesystemAdapter, Watcher};
 use crate::fs::suppression::DirtySet;
 use crate::path as path_norm;
@@ -169,6 +170,11 @@ impl Binding {
         {
             return false;
         }
+        // The hub gates connections on this file, so it must sync even when
+        // the user's include filter (markdown-only by default) would skip it.
+        if path == AUTHORIZED_KEYS_FILE {
+            return true;
+        }
         if !self.opts.include_patterns.is_empty()
             && !glob_match_any(&self.opts.include_patterns, path)
         {
@@ -188,6 +194,11 @@ impl Binding {
     }
 
     pub(crate) fn is_text_extension(&self, path: &str) -> bool {
+        // Pair with the special-case in `path_allowed`: the auth file has no
+        // extension but its content is text and must round-trip exactly.
+        if path == AUTHORIZED_KEYS_FILE {
+            return true;
+        }
         match Path::new(path).extension().and_then(|s| s.to_str()) {
             Some(ext) => self
                 .opts

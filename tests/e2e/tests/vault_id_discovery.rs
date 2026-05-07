@@ -77,8 +77,8 @@ async fn keyless_clone_via_subprocess() {
     // Pre-create a fresh identity for the cloning device and authorize it on
     // the hub.
     let clone_identity = Identity::generate();
-    let id_path = target_path.join(".agentsync").join("identity");
-    std::fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+    let id_dir = tempfile::TempDir::new().unwrap();
+    let id_path = id_dir.path().join("id");
     clone_identity.save_to_file(&id_path).unwrap();
     v.authorize_peer("cloner", &clone_identity.pubkey())
         .await
@@ -92,6 +92,8 @@ async fn keyless_clone_via_subprocess() {
         .arg(&v.rendezvous_url)
         .arg("--accept-hub-key")
         .arg(&hub_pubkey)
+        .arg("--identity")
+        .arg(&id_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)

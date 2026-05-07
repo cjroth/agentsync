@@ -4,6 +4,7 @@
 //! [`Vault`].
 
 pub mod auth;
+pub mod constants;
 pub mod doc;
 pub mod error;
 pub mod fs;
@@ -16,6 +17,10 @@ pub mod tls;
 pub mod vault;
 
 pub use auth::{build_transcript, random_nonce, HANDSHAKE_DOMAIN, NONCE_LEN};
+pub use constants::{
+    normalize_rendezvous_url, AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR, DEFAULT_PORT,
+    USER_IDENTITY_FILENAME, USER_STATE_DIR,
+};
 pub use doc::{
     content_hash, DirectoryMeta, Doc, FileId, FileKind, FileMeta, Label, SCHEMA_VERSION,
 };
@@ -28,7 +33,10 @@ pub mod agent {
     pub use crate::identity::agent_list_identities_at;
 }
 pub use net::{discover_vault_id, Frame, HelloOp};
-pub use peers_md::{parse_peers_md, render_peers_md, AuthorizedPeer, PEERS_FILE};
+pub use peers_md::{
+    parse_authorized_keys, parse_peers_md, render_authorized_keys, render_peers_md,
+    AuthorizedPeer, PEERS_FILE,
+};
 pub use vault::{
     CreateOptions, CreatedVault, OpenOptions, ReconnectOptions, SyncHandle, Vault, VaultConfig,
     VaultEvent, VaultEventKind, VaultId,

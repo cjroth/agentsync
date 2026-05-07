@@ -1,14 +1,19 @@
-//! Parser for `peers.md` — the markdown file at the root of a vault that
-//! lists authorized device pubkeys.
+//! Parser for `authorized_keys` — the SSH-style file at the root of a vault
+//! that lists authorized device pubkeys.
 //!
-//! The format is intentionally permissive: lines that look like
-//! `- ` ssh-ed25519 <base64> ` — <label>` are treated as authorized peers,
-//! and everything else is ignored as freeform notes. Editors can paste
-//! `~/.ssh/id_ed25519.pub` lines straight in.
+//! Format mirrors `~/.ssh/authorized_keys`: each line is
+//! `ssh-ed25519 <base64> [comment]`. Lines beginning with `#` are comments.
+//! Blank lines are ignored. Users can paste OpenSSH pubkey lines directly.
+//!
+//! The legacy markdown bullet form (`- `ssh-ed25519 ...` — alice`) is also
+//! accepted so half-migrated vaults don't break, but `render_authorized_keys`
+//! always emits the SSH-style form.
 
+use crate::constants::AUTHORIZED_KEYS_FILE;
 use crate::identity::Pubkey;
 
-pub const PEERS_FILE: &str = "peers.md";
+/// Backwards-compat alias. Prefer [`AUTHORIZED_KEYS_FILE`] in new code.
+pub const PEERS_FILE: &str = AUTHORIZED_KEYS_FILE;
 
 #[derive(Debug, Clone)]
 pub struct AuthorizedPeer {
@@ -16,9 +21,9 @@ pub struct AuthorizedPeer {
     pub label: String,
 }
 
-/// Parse `peers.md` content. Unparseable lines are silently skipped — they
-/// are assumed to be human-only commentary.
-pub fn parse_peers_md(content: &str) -> Vec<AuthorizedPeer> {
+/// Parse the SSH-style file content into a list of authorized peers.
+/// Unparseable / commented / blank lines are silently skipped.
+pub fn parse_authorized_keys(content: &str) -> Vec<AuthorizedPeer> {
     let mut out = Vec::new();
     for raw in content.lines() {
         if let Some(peer) = parse_line(raw) {
@@ -28,10 +33,42 @@ pub fn parse_peers_md(content: &str) -> Vec<AuthorizedPeer> {
     out
 }
 
+/// Backwards-compat alias.
+pub fn parse_peers_md(content: &str) -> Vec<AuthorizedPeer> {
+    parse_authorized_keys(content)
+}
+
 fn parse_line(raw: &str) -> Option<AuthorizedPeer> {
-    let line = raw.trim_start_matches(|c: char| c.is_whitespace());
-    let after_dash = strip_list_marker(line)?;
-    let (key_part, label) = split_key_and_label(after_dash);
+    let trimmed = raw.trim_start_matches(|c: char| c.is_whitespace());
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('#') {
+        return None;
+    }
+    // Accept the legacy markdown bullet form too. `- ` or `* ` prefix optional.
+    let body = strip_list_marker(trimmed).unwrap_or(trimmed);
+
+    // Strip wrapping backticks from the key portion (legacy form).
+    if body.starts_with('`') {
+        return parse_legacy(body);
+    }
+
+    let mut parts = body.splitn(3, char::is_whitespace);
+    let kind = parts.next()?;
+    let blob = parts.next()?;
+    let label = parts.next().map(|s| s.trim()).unwrap_or("").to_string();
+    let key_text = format!("{} {}", kind, blob);
+    let pk = Pubkey::from_ssh_string(&key_text).ok()?;
+    Some(AuthorizedPeer { pubkey: pk, label })
+}
+
+/// Parse one of the old `- `ssh-ed25519 ...` — alice` markdown bullet
+/// lines. Only reachable when a line opens with a backtick. Kept so that
+/// users who have an old rendered `peers.md` lying around can paste it
+/// straight into the new `authorized_keys` without hand-editing.
+fn parse_legacy(body: &str) -> Option<AuthorizedPeer> {
+    let (key_part, label) = split_key_and_label(body);
     let key_text = key_part.trim().trim_matches('`').trim();
     let pk = Pubkey::from_ssh_string(key_text).ok()?;
     Some(AuthorizedPeer {
@@ -41,7 +78,6 @@ fn parse_line(raw: &str) -> Option<AuthorizedPeer> {
 }
 
 fn strip_list_marker(line: &str) -> Option<&str> {
-    // Accept `- ` and `* ` markdown list markers.
     for marker in ["- ", "* "] {
         if let Some(rest) = line.strip_prefix(marker) {
             return Some(rest);
@@ -50,9 +86,6 @@ fn strip_list_marker(line: &str) -> Option<&str> {
     None
 }
 
-/// Split the line at the label separator. Accepts em-dash, en-dash, or two
-/// hyphens, optionally surrounded by whitespace. The label is the trimmed
-/// remainder; if no separator is present, the label is empty.
 fn split_key_and_label(s: &str) -> (&str, &str) {
     for sep in [" — ", " – ", " -- ", " - "] {
         if let Some(idx) = s.find(sep) {
@@ -63,23 +96,27 @@ fn split_key_and_label(s: &str) -> (&str, &str) {
     (s, "")
 }
 
-/// Render a list of authorized peers as canonical `peers.md` content, with a
-/// header. Used by `agentsync init` to seed a new vault.
-pub fn render_peers_md(peers: &[AuthorizedPeer]) -> String {
+/// Render a list of authorized peers in SSH `authorized_keys` format.
+pub fn render_authorized_keys(peers: &[AuthorizedPeer]) -> String {
     let mut out = String::new();
-    out.push_str("# Authorized peers\n\n");
-    out.push_str(
-        "Lines matching `- \\`ssh-ed25519 <base64>\\` — <label>` are parsed.\n\
-         Everything else is ignored — feel free to add freeform notes.\n\n",
-    );
+    out.push_str("# agentsync authorized_keys\n");
+    out.push_str("#\n");
+    out.push_str("# One ssh-ed25519 public key per line. Lines starting with '#' are\n");
+    out.push_str("# comments. Paste `agentsync key show` output from any device you\n");
+    out.push_str("# want to authorize.\n\n");
     for p in peers {
-        out.push_str(&format!(
-            "- `{}` — {}\n",
-            p.pubkey.to_ssh_string(),
-            if p.label.is_empty() { "(unlabeled)" } else { &p.label }
-        ));
+        if p.label.is_empty() {
+            out.push_str(&format!("{}\n", p.pubkey.to_ssh_string()));
+        } else {
+            out.push_str(&format!("{} {}\n", p.pubkey.to_ssh_string(), p.label));
+        }
     }
     out
+}
+
+/// Backwards-compat alias.
+pub fn render_peers_md(peers: &[AuthorizedPeer]) -> String {
+    render_authorized_keys(peers)
 }
 
 #[cfg(test)]
@@ -88,46 +125,42 @@ mod tests {
     use crate::identity::Identity;
 
     #[test]
-    fn parse_basic() {
+    fn parse_ssh_style_with_label() {
         let id = Identity::generate();
-        let line = format!("- `{}` — alice", id.pubkey().to_ssh_string());
-        let parsed = parse_peers_md(&line);
+        let line = format!("{} alice", id.pubkey().to_ssh_string());
+        let parsed = parse_authorized_keys(&line);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].pubkey, id.pubkey());
         assert_eq!(parsed[0].label, "alice");
     }
 
     #[test]
-    fn ignores_freeform_text() {
-        let content = "# Heading\n\nSome notes here.\n\n- not a key\n";
-        assert!(parse_peers_md(content).is_empty());
-    }
-
-    #[test]
-    fn parses_without_backticks() {
+    fn parse_ssh_style_no_label() {
         let id = Identity::generate();
-        let line = format!("- {} — bob", id.pubkey().to_ssh_string());
-        let parsed = parse_peers_md(&line);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].label, "bob");
-    }
-
-    #[test]
-    fn parses_double_dash_separator() {
-        let id = Identity::generate();
-        let line = format!("- `{}` -- carol (hub)", id.pubkey().to_ssh_string());
-        let parsed = parse_peers_md(&line);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].label, "carol (hub)");
-    }
-
-    #[test]
-    fn parses_no_label() {
-        let id = Identity::generate();
-        let line = format!("- `{}`", id.pubkey().to_ssh_string());
-        let parsed = parse_peers_md(&line);
+        let line = id.pubkey().to_ssh_string();
+        let parsed = parse_authorized_keys(&line);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].label, "");
+    }
+
+    #[test]
+    fn ignores_comments_and_blank_lines() {
+        let id = Identity::generate();
+        let body = format!(
+            "# top comment\n\n   # indented comment\n{} alice\n",
+            id.pubkey().to_ssh_string()
+        );
+        let parsed = parse_authorized_keys(&body);
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn accepts_legacy_markdown_bullet_form() {
+        let id = Identity::generate();
+        let line = format!("- `{}` — bob", id.pubkey().to_ssh_string());
+        let parsed = parse_authorized_keys(&line);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].label, "bob");
     }
 
     #[test]
@@ -137,10 +170,22 @@ mod tests {
             pubkey: id.pubkey(),
             label: "alice".into(),
         }];
-        let rendered = render_peers_md(&peers);
-        let parsed = parse_peers_md(&rendered);
+        let rendered = render_authorized_keys(&peers);
+        let parsed = parse_authorized_keys(&rendered);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].pubkey, id.pubkey());
         assert_eq!(parsed[0].label, "alice");
+    }
+
+    #[test]
+    fn render_emits_ssh_style_no_markdown() {
+        let id = Identity::generate();
+        let peers = vec![AuthorizedPeer {
+            pubkey: id.pubkey(),
+            label: "alice".into(),
+        }];
+        let body = render_authorized_keys(&peers);
+        assert!(!body.contains("- `"), "must not use markdown bullets");
+        assert!(body.contains("ssh-ed25519 "));
     }
 }

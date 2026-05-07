@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 mod cli;
@@ -38,6 +39,18 @@ async fn main() -> Result<()> {
         cli::Command::Compact(args) => commands::compact::run(args).await,
         cli::Command::Key(args) => commands::key::run(args).await,
         cli::Command::Hub(args) => commands::hub::run(args).await,
+        cli::Command::Completions(args) => {
+            let shell = match args.shell {
+                cli::ShellKind::Bash => Shell::Bash,
+                cli::ShellKind::Zsh => Shell::Zsh,
+                cli::ShellKind::Fish => Shell::Fish,
+                cli::ShellKind::PowerShell => Shell::PowerShell,
+                cli::ShellKind::Elvish => Shell::Elvish,
+            };
+            let mut cmd = cli::Cli::command();
+            clap_complete::generate(shell, &mut cmd, "agentsync", &mut std::io::stdout());
+            Ok(())
+        }
         cli::Command::Version => {
             println!("agentsync {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -48,7 +61,12 @@ async fn main() -> Result<()> {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("AGENTSYNC_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    // Logs go to stderr so they don't pollute stdout-based protocols (the
+    // listen-port handshake the harness reads from stdout, etc).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 pub fn default_storage_path(working_dir: &PathBuf) -> PathBuf {

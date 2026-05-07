@@ -3,9 +3,11 @@ use crate::error::{Error, Result};
 use crate::identity::{Identity, Pubkey};
 use crate::net::client::handle_inbound;
 use crate::net::protocol::Frame;
+use crate::peers_md::AuthorizedPeer;
 use crate::tls::{cert_fingerprint, server_config};
 use crate::vault::SyncHandle;
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,13 +112,24 @@ impl Server {
         let mut enforcer_shutdown = shutdown_tx.subscribe();
         let enforcer_handle = sync_handle.clone();
         let enforcer = tokio::spawn(async move {
+            // Seed with the initial set so we don't spam "peer added" for
+            // every entry on startup.
+            let mut known: HashMap<Pubkey, String> = enforcer_handle
+                .authorized_peers()
+                .await
+                .into_iter()
+                .map(|p| (p.pubkey, p.label))
+                .collect();
             loop {
                 tokio::select! {
                     biased;
                     _ = enforcer_shutdown.recv() => break,
                     _ = enforcer_handle.wait_doc_changed() => {
-                        let authorized = enforcer_handle.authorized_pubkeys().await;
-                        enforcer_handle.disconnect_unauthorized_peers(&authorized).await;
+                        let current = enforcer_handle.authorized_peers().await;
+                        log_authorized_diff(&known, &current);
+                        let pubkeys: Vec<Pubkey> = current.iter().map(|p| p.pubkey).collect();
+                        enforcer_handle.disconnect_unauthorized_peers(&pubkeys).await;
+                        known = current.into_iter().map(|p| (p.pubkey, p.label)).collect();
                     }
                 }
             }
@@ -155,6 +168,44 @@ impl Drop for Server {
         if let Some(h) = self.enforcer_task.take() {
             h.abort();
         }
+    }
+}
+
+/// Compare the previously-known authorized set against the current parse of
+/// `authorized_keys` and emit a single `info!` line per addition or removal.
+/// The enforcer runs on every doc-change notification (any synced file edit),
+/// so the common case is "no change" — short-circuit before allocating.
+fn log_authorized_diff(prev: &HashMap<Pubkey, String>, current: &[AuthorizedPeer]) {
+    if prev.len() == current.len() && current.iter().all(|p| prev.contains_key(&p.pubkey)) {
+        return;
+    }
+    for p in current {
+        if !prev.contains_key(&p.pubkey) {
+            info!(
+                fp = %p.pubkey.fingerprint_sha256(),
+                label = %label_or_unlabeled(&p.label),
+                "peer added to authorized_keys",
+            );
+        }
+    }
+    use std::collections::HashSet;
+    let cur_keys: HashSet<Pubkey> = current.iter().map(|p| p.pubkey).collect();
+    for (pk, label) in prev {
+        if !cur_keys.contains(pk) {
+            info!(
+                fp = %pk.fingerprint_sha256(),
+                label = %label_or_unlabeled(label),
+                "peer removed from authorized_keys",
+            );
+        }
+    }
+}
+
+fn label_or_unlabeled(s: &str) -> &str {
+    if s.is_empty() {
+        "(unlabeled)"
+    } else {
+        s
     }
 }
 
@@ -219,7 +270,7 @@ async fn handle_peer(
             ))
             .await;
         return Err(Error::Auth(format!(
-            "peer not in peers.md: {}",
+            "peer not in authorized_keys: {}",
             peer_pubkey.fingerprint_sha256()
         )));
     }

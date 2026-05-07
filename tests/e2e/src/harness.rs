@@ -1,10 +1,11 @@
 use agentsync_core::{
-    render_peers_md, AuthorizedPeer, CreateOptions, Identity, Pubkey, Vault,
+    render_authorized_keys, AuthorizedPeer, CreateOptions, Identity, Pubkey, Vault,
+    AUTHORIZED_KEYS_FILE,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -19,7 +20,7 @@ pub struct E2EVault {
     pub rendezvous_url: String,
     pub rendezvous: Peer,
     pub peers: Vec<Peer>,
-    /// Authorized peer pubkeys, kept in sync with the on-disk peers.md.
+    /// Authorized peer pubkeys, kept in sync with the on-disk authorized_keys.
     authorized: Vec<AuthorizedPeer>,
 }
 
@@ -31,6 +32,10 @@ pub struct Peer {
     pub dir: TempDir,
     pub identity: Identity,
     proc: Option<Child>,
+    /// Captures stderr lines as the child emits them. Tests can poll this
+    /// via `Peer::stderr_dump` / `Peer::wait_for_stderr` to assert on log
+    /// output without relying on `AGENTSYNC_E2E_VERBOSE`.
+    stderr_lines: Arc<Mutex<Vec<String>>>,
 }
 
 impl E2EVault {
@@ -61,17 +66,19 @@ impl E2EVault {
             .context("waiting for rendezvous to bind")?;
         let rendezvous_url = format!("wss://127.0.0.1:{}", port);
 
-        spawn_log_drainer(&mut child, "rendezvous");
+        let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+        spawn_log_drainer(&mut child, "rendezvous", Some(stderr_lines.clone()));
 
         let rendezvous = Peer {
             name: "rendezvous".into(),
             dir: rendezvous_dir,
             identity: rendezvous_identity.clone(),
             proc: Some(child),
+            stderr_lines,
         };
 
         // Sort the authorized list deterministically (cheap, helps tests that
-        // diff peers.md content).
+        // diff authorized_keys content).
         authorized.sort_by(|a, b| a.label.cmp(&b.label));
 
         Ok(E2EVault {
@@ -86,7 +93,7 @@ impl E2EVault {
 
     /// Add a new client peer that connects to the rendezvous. Generates a
     /// fresh ed25519 identity, authorizes it on the hub (by appending to
-    /// peers.md on the hub's disk), and waits for the spawned peer to reach
+    /// authorized_keys on the hub's disk), and waits for the spawned peer to reach
     /// the watching state.
     pub async fn add_peer(&mut self, name: &str) -> Result<usize> {
         let dir = TempDir::new()?;
@@ -99,7 +106,7 @@ impl E2EVault {
             .context("write peer identity")?;
 
         // Authorize the peer on the hub side BEFORE the connect attempt; the
-        // hub's file watcher ingests peers.md within the debounce window.
+        // hub's file watcher ingests authorized_keys within the debounce window.
         self.authorize_peer(name, &identity.pubkey()).await?;
 
         write_config(dir.path(), &self.vault_id, Some(&self.rendezvous_url))?;
@@ -115,13 +122,15 @@ impl E2EVault {
             .await
             .with_context(|| format!("peer {} did not reach watching state", name))?;
 
-        spawn_log_drainer(&mut child, name);
+        let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+        spawn_log_drainer(&mut child, name, Some(stderr_lines.clone()));
 
         self.peers.push(Peer {
             name: name.to_string(),
             dir,
             identity,
             proc: Some(child),
+            stderr_lines,
         });
         // Allow the freshly-connected peer to complete the initial sync round
         // before tests start writing.
@@ -129,7 +138,7 @@ impl E2EVault {
         Ok(self.peers.len() - 1)
     }
 
-    /// Append `pubkey` to the hub's peers.md (on disk and in memory) so the
+    /// Append `pubkey` to the hub's authorized_keys (on disk and in memory) so the
     /// hub will accept connections from a peer holding the matching identity.
     pub async fn authorize_peer(&mut self, label: &str, pubkey: &Pubkey) -> Result<()> {
         if self.authorized.iter().any(|p| p.pubkey == *pubkey) {
@@ -146,7 +155,7 @@ impl E2EVault {
         Ok(())
     }
 
-    /// Remove a peer's pubkey from the hub's peers.md. After the rendezvous
+    /// Remove a peer's pubkey from the hub's authorized_keys. After the rendezvous
     /// re-evaluates authorizations, any currently-connected peer with that
     /// pubkey is dropped.
     pub async fn deauthorize_peer(&mut self, pubkey: &Pubkey) -> Result<()> {
@@ -211,7 +220,7 @@ impl E2EVault {
         if bound_port != port {
             bail!("rendezvous rebound on a different port: wanted {port}, got {bound_port}");
         }
-        spawn_log_drainer(&mut child, "rendezvous");
+        spawn_log_drainer(&mut child, "rendezvous", Some(self.rendezvous.stderr_lines.clone()));
         self.rendezvous.proc = Some(child);
         Ok(())
     }
@@ -241,6 +250,7 @@ impl E2EVault {
             dir: rendezvous_dir,
             identity: rendezvous_identity,
             proc: None,
+            stderr_lines: Arc::new(Mutex::new(Vec::new())),
         };
 
         Ok(E2EVault {
@@ -271,7 +281,7 @@ impl E2EVault {
         if bound_port != port {
             bail!("rendezvous bound a different port: wanted {port}, got {bound_port}");
         }
-        spawn_log_drainer(&mut child, "rendezvous");
+        spawn_log_drainer(&mut child, "rendezvous", Some(self.rendezvous.stderr_lines.clone()));
         self.rendezvous.proc = Some(child);
         Ok(())
     }
@@ -279,7 +289,7 @@ impl E2EVault {
     /// Spawn an authorized peer process without waiting for it to reach
     /// `watching` — handy for tests that want to observe early-startup
     /// behavior (e.g. handshake errors). The peer's pubkey is added to
-    /// peers.md before spawning.
+    /// authorized_keys before spawning.
     pub async fn add_peer_without_waiting(&mut self, name: &str) -> Result<usize> {
         let dir = TempDir::new()?;
         let identity = Identity::generate();
@@ -298,18 +308,20 @@ impl E2EVault {
             .spawn()
             .with_context(|| format!("spawn peer {}", name))?;
 
-        spawn_log_drainer(&mut child, name);
+        let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+        spawn_log_drainer(&mut child, name, Some(stderr_lines.clone()));
 
         self.peers.push(Peer {
             name: name.to_string(),
             dir,
             identity,
             proc: Some(child),
+            stderr_lines,
         });
         Ok(self.peers.len() - 1)
     }
 
-    /// Spawn a peer whose pubkey is *not* added to peers.md. The returned
+    /// Spawn a peer whose pubkey is *not* added to authorized_keys. The returned
     /// process is expected to fail at handshake time; tests should observe
     /// its stderr or exit code.
     pub async fn add_unauthorized_peer(&mut self, name: &str) -> Result<usize> {
@@ -328,13 +340,15 @@ impl E2EVault {
             .spawn()
             .with_context(|| format!("spawn unauthorized peer {}", name))?;
 
-        spawn_log_drainer(&mut child, name);
+        let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+        spawn_log_drainer(&mut child, name, Some(stderr_lines.clone()));
 
         self.peers.push(Peer {
             name: name.to_string(),
             dir,
             identity,
             proc: Some(child),
+            stderr_lines,
         });
         Ok(self.peers.len() - 1)
     }
@@ -350,6 +364,32 @@ impl Drop for E2EVault {
 impl Peer {
     pub fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// Snapshot of every stderr line the child has emitted so far, joined
+    /// with newlines. Useful for printing in failure messages.
+    pub fn stderr_dump(&self) -> String {
+        self.stderr_lines.lock().unwrap().join("\n")
+    }
+
+    /// Wait until any stderr line satisfies `pred` or the timeout elapses.
+    /// Returns the matching line on success.
+    pub async fn wait_for_stderr(
+        &self,
+        mut pred: impl FnMut(&str) -> bool,
+        timeout: Duration,
+    ) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            {
+                let lines = self.stderr_lines.lock().unwrap();
+                if let Some(found) = lines.iter().rev().find(|l| pred(l)) {
+                    return Some(found.clone());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
     }
 
     pub fn abs(&self, rel: &str) -> PathBuf {
@@ -520,8 +560,8 @@ async fn bootstrap_rendezvous_storage() -> Result<(TempDir, Identity, String)> {
 }
 
 fn write_peers_md(dir: &Path, peers: &[AuthorizedPeer]) -> Result<()> {
-    let body = render_peers_md(peers);
-    std::fs::write(dir.join("peers.md"), body)?;
+    let body = render_authorized_keys(peers);
+    std::fs::write(dir.join(AUTHORIZED_KEYS_FILE), body)?;
     Ok(())
 }
 
@@ -562,7 +602,12 @@ log_retention_days = 30
 fn base_command(binary: &Path, dir: &Path) -> Command {
     let mut cmd = Command::new(binary);
     cmd.current_dir(dir)
-        .env("AGENTSYNC_LOG", std::env::var("AGENTSYNC_LOG").unwrap_or_else(|_| "warn".into()))
+        // Default to `info` so peer-add/remove notices land in stderr;
+        // tests that need verbose output can override via AGENTSYNC_LOG.
+        .env(
+            "AGENTSYNC_LOG",
+            std::env::var("AGENTSYNC_LOG").unwrap_or_else(|_| "info".into()),
+        )
         .kill_on_drop(true);
     cmd
 }
@@ -624,7 +669,11 @@ async fn wait_for_line(child: &mut Child, mut pred: impl FnMut(&str) -> bool) ->
     }
 }
 
-fn spawn_log_drainer(child: &mut Child, label: &str) {
+fn spawn_log_drainer(
+    child: &mut Child,
+    label: &str,
+    stderr_sink: Option<Arc<Mutex<Vec<String>>>>,
+) {
     if let Some(out) = child.stdout.take() {
         let label = label.to_string();
         tokio::spawn(async move {
@@ -641,6 +690,9 @@ fn spawn_log_drainer(child: &mut Child, label: &str) {
         tokio::spawn(async move {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(sink) = stderr_sink.as_ref() {
+                    sink.lock().unwrap().push(line.clone());
+                }
                 if std::env::var("AGENTSYNC_E2E_VERBOSE").is_ok() {
                     eprintln!("[{}/stderr] {}", label, line);
                 }

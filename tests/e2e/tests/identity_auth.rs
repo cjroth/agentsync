@@ -1,7 +1,7 @@
-//! Phase 1 — per-peer ed25519 identities and `peers.md` authorization.
+//! Phase 1 — per-peer ed25519 identities and `authorized_keys` authorization.
 //!
 //! These tests pin down the user-visible behavior of identity-based auth:
-//! the CLI's `key` subcommand surface, the hub's gating on `peers.md`, and
+//! the CLI's `key` subcommand surface, the hub's gating on `authorized_keys`, and
 //! the listener's reaction to a peer being removed mid-session.
 
 use agentsync_core::{Identity, Pubkey};
@@ -11,15 +11,17 @@ use std::time::Duration;
 const T: Duration = Duration::from_secs(10);
 
 /// `agentsync init` writes a fresh identity, prints its pubkey, and seeds
-/// peers.md with the creator's pubkey so the very first listener accepts
+/// authorized_keys with the creator's pubkey so the very first listener accepts
 /// connections from itself / its in-process peers.
 #[tokio::test]
-async fn init_creates_identity_and_seeds_peers_md() {
+async fn init_creates_identity_and_seeds_authorized_keys() {
     let dir = tempfile::TempDir::new().unwrap();
+    let home = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
 
     let out = tokio::process::Command::new(&binary)
         .arg("init")
+        .env("HOME", home.path())
         .current_dir(dir.path())
         .output()
         .await
@@ -32,10 +34,10 @@ async fn init_creates_identity_and_seeds_peers_md() {
         stdout
     );
 
-    let identity_path = dir.path().join(".agentsync").join("identity");
+    let identity_path = home.path().join(".agentsync").join("id_ed25519");
     assert!(
         identity_path.exists(),
-        ".agentsync/identity not created at {}",
+        "~/.agentsync/id_ed25519 not created at {}",
         identity_path.display()
     );
     // The seed file must round-trip into a valid Identity.
@@ -47,11 +49,12 @@ async fn init_creates_identity_and_seeds_peers_md() {
         .trim();
     assert_eq!(printed_pub, id.pubkey().to_ssh_string());
 
-    // The doc seeded peers.md with this pubkey.
-    // Materialize peers.md to disk by running watch briefly so we can read it.
+    // The doc seeded authorized_keys with this pubkey.
+    // Materialize authorized_keys to disk by running watch briefly so we can read it.
     let mut child = tokio::process::Command::new(&binary)
         .arg("watch")
         .arg("--offline")
+        .env("HOME", home.path())
         .current_dir(dir.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -61,15 +64,15 @@ async fn init_creates_identity_and_seeds_peers_md() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let _ = child.kill().await;
 
-    let peers_md_path = dir.path().join("peers.md");
+    let authorized_keys_path = dir.path().join("authorized_keys");
     assert!(
-        peers_md_path.exists(),
-        "peers.md was not materialized to disk by watch"
+        authorized_keys_path.exists(),
+        "authorized_keys was not materialized to disk by watch"
     );
-    let body = std::fs::read_to_string(&peers_md_path).unwrap();
+    let body = std::fs::read_to_string(&authorized_keys_path).unwrap();
     assert!(
         body.contains(printed_pub),
-        "peers.md does not contain creator pubkey:\n{}",
+        "authorized_keys does not contain creator pubkey:\n{}",
         body
     );
 }
@@ -107,7 +110,7 @@ async fn key_show_prints_pubkey() {
     let _ = Pubkey::from_ssh_string(line).unwrap();
 }
 
-/// Two CLI peers, both authorized in peers.md, sync end to end. Drives the
+/// Two CLI peers, both authorized in authorized_keys, sync end to end. Drives the
 /// happy path through the new four-message handshake.
 #[tokio::test]
 async fn authorized_peers_sync_end_to_end() {
@@ -123,7 +126,7 @@ async fn authorized_peers_sync_end_to_end() {
     v.shutdown().await;
 }
 
-/// A peer whose pubkey is not in peers.md must not sync. The subprocess may
+/// A peer whose pubkey is not in authorized_keys must not sync. The subprocess may
 /// stay alive (the reconnect supervisor keeps trying), but writes from the
 /// hub never reach the unauthorized peer's disk.
 #[tokio::test]
@@ -148,7 +151,7 @@ async fn unauthorized_peer_does_not_sync() {
     v.shutdown().await;
 }
 
-/// Removing a peer's pubkey from peers.md disconnects them within a short
+/// Removing a peer's pubkey from authorized_keys disconnects them within a short
 /// window. Specifically: writes from the now-deauthorized peer must stop
 /// propagating to the hub.
 #[tokio::test]
@@ -163,7 +166,7 @@ async fn deauthorize_disconnects_peer() {
         .await
         .unwrap();
 
-    // Yank alice from peers.md.
+    // Yank alice from authorized_keys.
     let alice_pk = v.peer(0).pubkey();
     v.deauthorize_peer(&alice_pk).await.unwrap();
 
@@ -198,13 +201,14 @@ async fn clone_uses_local_identity() {
     let binary = locate_binary();
 
     let id = Identity::generate();
-    let id_path = target_path.join(".agentsync").join("identity");
-    std::fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+    let id_dir = tempfile::TempDir::new().unwrap();
+    let id_path = id_dir.path().join("id");
     id.save_to_file(&id_path).unwrap();
     v.authorize_peer("cloner", &id.pubkey()).await.unwrap();
 
     // Pin the hub up front via --accept-hub-key so the subprocess doesn't
-    // block on the interactive trust prompt.
+    // block on the interactive trust prompt. Pass --identity so the clone
+    // uses our pre-authorized key instead of generating a fresh one.
     let hub_pubkey = v.rendezvous.identity.pubkey().to_ssh_string();
     let mut child = tokio::process::Command::new(&binary)
         .arg("clone")
@@ -213,6 +217,8 @@ async fn clone_uses_local_identity() {
         .arg(&v.rendezvous_url)
         .arg("--accept-hub-key")
         .arg(&hub_pubkey)
+        .arg("--identity")
+        .arg(&id_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)

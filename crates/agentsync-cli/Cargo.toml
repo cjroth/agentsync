@@ -14,6 +14,7 @@ path = "src/main.rs"
 agentsync-core = { path = "../agentsync-core" }
 tokio.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

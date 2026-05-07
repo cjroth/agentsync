@@ -34,8 +34,8 @@ async fn default_skips_non_markdown_files() {
 
     let mut paths = vault.list_file_paths().await.unwrap();
     paths.sort();
-    // peers.md is auto-seeded by `Vault::create`; ignore it for this assert.
-    paths.retain(|p| p != "peers.md");
+    // authorized_keys is auto-seeded by `Vault::create`; ignore it for this assert.
+    paths.retain(|p| p != "authorized_keys");
     assert_eq!(paths, vec!["note.md".to_string()]);
 }
 
@@ -61,7 +61,7 @@ async fn extending_text_extensions_opts_in_more_files() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut paths = vault.list_file_paths().await.unwrap();
-    paths.retain(|p| p != "peers.md");
+    paths.retain(|p| p != "authorized_keys");
     paths.sort();
     assert_eq!(
         paths,
@@ -97,7 +97,7 @@ async fn explicit_size_limit_is_respected() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut paths = vault.list_file_paths().await.unwrap();
-    paths.retain(|p| p != "peers.md");
+    paths.retain(|p| p != "authorized_keys");
     paths.sort();
     assert_eq!(paths, vec!["ok.md".to_string()]);
 }

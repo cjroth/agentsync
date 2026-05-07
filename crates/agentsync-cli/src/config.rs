@@ -1,4 +1,4 @@
-use agentsync_core::{Identity, Pubkey};
+use agentsync_core::{Identity, Pubkey, USER_IDENTITY_FILENAME, USER_STATE_DIR};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -135,19 +135,34 @@ pub fn write(vault_root: &Path, cfg: &ConfigFile) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the configured identity-secret path against the vault root.
+/// Resolve the configured identity-secret path. Resolution order:
+///
+///   1. `[identity] path` from `config.toml` (relative paths resolve against
+///      the vault root; absolute paths are used as-is).
+///   2. `~/<USER_STATE_DIR>/<USER_IDENTITY_FILENAME>` — the user-level
+///      default, shared across all of this user's vaults (mirrors SSH's
+///      `~/.ssh/id_ed25519` convention).
 pub fn identity_path(vault_root: &Path, cfg: &ConfigFile) -> PathBuf {
-    let rel = cfg
-        .identity
-        .path
-        .as_deref()
-        .unwrap_or(".agentsync/identity");
-    let p = PathBuf::from(rel);
-    if p.is_absolute() {
-        p
-    } else {
-        vault_root.join(p)
+    if let Some(rel) = cfg.identity.path.as_deref() {
+        let p = PathBuf::from(rel);
+        return if p.is_absolute() {
+            p
+        } else {
+            vault_root.join(p)
+        };
     }
+    user_identity_default()
+}
+
+/// `~/.agentsync/id_ed25519`, with `$HOME` resolution. Falls back to a
+/// path under the vault root if `$HOME` is unset (rare; mostly relevant
+/// in restricted CI environments).
+pub fn user_identity_default() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(USER_STATE_DIR).join(USER_IDENTITY_FILENAME)
 }
 
 /// Resolve the configured identity. Discovery rules per AUTH.md Phase 3:
@@ -170,7 +185,7 @@ pub fn resolve_identity(vault_root: &Path, cfg: &ConfigFile) -> Result<Identity>
         anyhow::bail!(
             "identity file not found at {}. \
              Run `agentsync key generate` to create one, then add the printed pubkey \
-             to peers.md before connecting.",
+             to authorized_keys before connecting.",
             path.display()
         );
     }

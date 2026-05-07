@@ -1,7 +1,7 @@
 use crate::cli::WatchArgs;
 use crate::commands::require_config;
 use crate::config;
-use agentsync_core::{OpenOptions, ReconnectOptions, Vault};
+use agentsync_core::{normalize_rendezvous_url, OpenOptions, ReconnectOptions, Vault};
 use anyhow::{Context, Result};
 use tracing::info;
 
@@ -34,7 +34,8 @@ pub async fn run(args: WatchArgs) -> Result<()> {
         None
     } else {
         args.rendezvous
-            .clone()
+            .as_deref()
+            .map(normalize_rendezvous_url)
             .or_else(|| cfg.vault.rendezvous_url.clone())
     };
 
