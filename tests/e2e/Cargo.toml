@@ -50,3 +50,7 @@ path = "tests/folder_sync.rs"
 [[test]]
 name = "graceful_close"
 path = "tests/graceful_close.rs"
+
+[[test]]
+name = "reconnect"
+path = "tests/reconnect.rs"

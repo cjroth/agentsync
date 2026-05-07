@@ -3,9 +3,10 @@ use crate::error::{Error, Result};
 use crate::net::protocol::{Frame, HelloOp};
 use crate::vault::SyncHandle;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
@@ -56,6 +57,51 @@ pub struct ClientConn {
     notif_task: Option<JoinHandle<()>>,
     sync_handle: Arc<dyn SyncHandle>,
     peer_id: u64,
+    /// Fired by the reader task when the websocket has closed for any reason.
+    closed_notify: Arc<Notify>,
+    /// Read by `wait_closed` to short-circuit when closure already fired —
+    /// `Notify::notify_waiters` only wakes already-registered waiters, so a
+    /// pure-Notify implementation would race against a fast-closing peer.
+    is_closed: Arc<AtomicBool>,
+}
+
+impl ClientConn {
+    /// Resolves once the underlying websocket has closed (peer hangup, write
+    /// error, or network drop). Returns immediately if the connection is
+    /// already gone. Used by the reconnect supervisor to detect when to
+    /// retry.
+    pub async fn wait_closed(&self) {
+        self.closed_signal().wait().await;
+    }
+
+    /// Detaches a closure-watcher that doesn't borrow the conn. Lets the
+    /// reconnect supervisor wait for closure without holding the
+    /// `Mutex<Option<ClientConn>>` lock that everyone else needs.
+    pub fn closed_signal(&self) -> ClosedSignal {
+        ClosedSignal {
+            notify: self.closed_notify.clone(),
+            flag: self.is_closed.clone(),
+        }
+    }
+}
+
+/// Detached closure watcher; see `ClientConn::closed_signal`.
+#[derive(Clone)]
+pub struct ClosedSignal {
+    notify: Arc<Notify>,
+    flag: Arc<AtomicBool>,
+}
+
+impl ClosedSignal {
+    pub async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.flag.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
 }
 
 impl ClientConn {
@@ -185,6 +231,10 @@ impl ClientConn {
         // Reader task: process inbound frames.
         let sync_for_reader = sync_handle.clone();
         let out_for_reader = out_tx.clone();
+        let closed_notify = Arc::new(Notify::new());
+        let is_closed = Arc::new(AtomicBool::new(false));
+        let reader_closed_notify = closed_notify.clone();
+        let reader_is_closed = is_closed.clone();
         let reader_task = tokio::spawn(async move {
             while let Some(msg) = reader.next().await {
                 let bytes = match msg {
@@ -206,6 +256,10 @@ impl ClientConn {
                 handle_inbound(peer_id, frame, &sync_for_reader, &out_for_reader).await;
             }
             sync_for_reader.unregister_peer(peer_id).await;
+            // Fire the close signal AFTER unregistering so that anyone the
+            // supervisor wakes sees a fully cleaned-up state.
+            reader_is_closed.store(true, Ordering::Release);
+            reader_closed_notify.notify_waiters();
         });
 
         // Doc-change notifier: when local doc changes, generate sync messages.
@@ -239,6 +293,8 @@ impl ClientConn {
             notif_task: Some(notif_task),
             sync_handle,
             peer_id,
+            closed_notify,
+            is_closed,
         })
     }
 }

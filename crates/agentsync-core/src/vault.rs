@@ -16,9 +16,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub type VaultId = String;
@@ -84,8 +85,125 @@ pub(crate) struct VaultInner {
     // active outbound connection (if any)
     pub client: Mutex<Option<ClientConn>>,
     pub server: Mutex<Option<Server>>,
+    /// Background task that maintains the outbound connection: handles initial
+    /// connect with backoff and reconnects on disconnect. Spawned by
+    /// `Vault::connect_with_reconnect`. `None` if the vault was opened with
+    /// the one-shot `Vault::connect` instead, or if no outbound connection
+    /// has been requested.
+    pub(crate) reconnect_supervisor: Mutex<Option<ReconnectSupervisor>>,
 
     pub config: VaultConfig,
+}
+
+/// Tunables for `Vault::connect_with_reconnect`. The defaults match the spec:
+/// 10 attempts, 500ms initial backoff, capped at 30s.
+#[derive(Debug, Clone)]
+pub struct ReconnectOptions {
+    /// Maximum number of consecutive failed connect attempts before the
+    /// supervisor gives up. Reset to zero on every successful connect, so
+    /// each fresh disconnect gets its own budget.
+    pub max_attempts: u32,
+    /// Backoff before the second connect attempt. Doubles each subsequent
+    /// failure, capped at `max_backoff`.
+    pub initial_backoff: Duration,
+    /// Upper bound on the per-attempt backoff.
+    pub max_backoff: Duration,
+}
+
+impl Default for ReconnectOptions {
+    fn default() -> Self {
+        Self {
+            max_attempts: 10,
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(30),
+        }
+    }
+}
+
+pub(crate) struct ReconnectSupervisor {
+    pub shutdown_tx: oneshot::Sender<()>,
+    pub handle: JoinHandle<()>,
+}
+
+impl ReconnectSupervisor {
+    async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.handle).await;
+    }
+}
+
+fn backoff_delay(initial: Duration, cap: Duration, attempt: u32) -> Duration {
+    // attempt is 1-based: first failure gets `initial`, then doubles.
+    let exp = attempt.saturating_sub(1).min(20);
+    let factor = 1u64 << exp;
+    let millis = (initial.as_millis() as u64).saturating_mul(factor);
+    Duration::from_millis(millis).min(cap)
+}
+
+enum ConnectResult {
+    Connected(ClientConn),
+    /// User called `disconnect()` while we were trying to connect.
+    Shutdown,
+    /// Hit `max_attempts` without succeeding.
+    GaveUp,
+}
+
+/// Runs the connect-with-backoff loop. Cooperatively cancellable via
+/// `shutdown_rx`.
+async fn connect_with_backoff(
+    inner: &Arc<VaultInner>,
+    url: &str,
+    opts: &ReconnectOptions,
+    shutdown_rx: &mut oneshot::Receiver<()>,
+) -> ConnectResult {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let result = ClientConn::connect(
+            url,
+            inner.vault_id.clone(),
+            inner.vault_key,
+            Arc::new(VaultSyncHandle {
+                inner: inner.clone(),
+            }) as Arc<dyn SyncHandle>,
+        )
+        .await;
+        match result {
+            Ok(c) => {
+                info!(url, attempt, "connected to rendezvous");
+                return ConnectResult::Connected(c);
+            }
+            Err(e) => {
+                if attempt >= opts.max_attempts {
+                    warn!(
+                        url,
+                        attempt,
+                        error = %e,
+                        "connect attempt failed (max retries reached)"
+                    );
+                    let _ = inner.events.send(VaultEvent {
+                        kind: VaultEventKind::Error(format!(
+                            "could not connect to rendezvous after {} attempts: {}",
+                            attempt, e
+                        )),
+                    });
+                    return ConnectResult::GaveUp;
+                }
+                let delay = backoff_delay(opts.initial_backoff, opts.max_backoff, attempt);
+                warn!(
+                    url,
+                    attempt,
+                    error = %e,
+                    retry_in_ms = delay.as_millis() as u64,
+                    "connect attempt failed; retrying"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = &mut *shutdown_rx => return ConnectResult::Shutdown,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +266,7 @@ impl Vault {
             events: broadcast::channel(64).0,
             client: Mutex::new(None),
             server: Mutex::new(None),
+            reconnect_supervisor: Mutex::new(None),
             config: VaultConfig {
                 rendezvous_url: opts.rendezvous_url,
                 ..Default::default()
@@ -200,6 +319,7 @@ impl Vault {
             events: broadcast::channel(64).0,
             client: Mutex::new(None),
             server: Mutex::new(None),
+            reconnect_supervisor: Mutex::new(None),
             config: VaultConfig {
                 rendezvous_url: opts.rendezvous_url,
                 ..Default::default()
@@ -443,8 +563,16 @@ impl Vault {
 
     /// Drop the active outbound connection (if any). Sends a WebSocket Close
     /// frame to the peer before tearing down the socket so the remote side
-    /// observes a clean shutdown rather than a TCP reset.
+    /// observes a clean shutdown rather than a TCP reset. Also stops any
+    /// running reconnect supervisor so it doesn't immediately re-establish
+    /// the connection.
     pub async fn disconnect(&mut self) {
+        // Stop the supervisor first; otherwise it could race with us and
+        // immediately reconnect after we tear the connection down.
+        let supervisor = self.inner.reconnect_supervisor.lock().await.take();
+        if let Some(s) = supervisor {
+            s.shutdown().await;
+        }
         let conn = self.inner.client.lock().await.take();
         if let Some(c) = conn {
             c.close().await;
@@ -452,6 +580,90 @@ impl Vault {
         let _ = self.inner.events.send(VaultEvent {
             kind: VaultEventKind::Disconnected,
         });
+    }
+
+    /// Spawn a supervisor task that maintains an outbound connection to the
+    /// configured rendezvous. The first connect is retried with exponential
+    /// backoff up to `opts.max_attempts` times before the supervisor gives
+    /// up. Once connected, every disconnect — peer hangup, network drop,
+    /// rendezvous restart — triggers another retry sequence with the same
+    /// budget.
+    ///
+    /// Returns immediately after spawning. `disconnect()` stops the
+    /// supervisor cleanly. If a supervisor is already running, it is
+    /// replaced.
+    pub async fn connect_with_reconnect(&mut self, opts: ReconnectOptions) -> Result<()> {
+        // Stop any prior supervisor + connection so we don't end up with two
+        // racing client sessions sharing the same vault.
+        self.disconnect().await;
+
+        let url = match self.inner.config.rendezvous_url.clone() {
+            Some(u) => u,
+            None => return Err(Error::Network("no rendezvous_url configured".into())),
+        };
+
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let inner = self.inner.clone();
+        let handle = tokio::spawn(async move {
+            'outer: loop {
+                // -- connect-with-backoff phase --
+                let conn = match connect_with_backoff(
+                    &inner,
+                    &url,
+                    &opts,
+                    &mut shutdown_rx,
+                )
+                .await
+                {
+                    ConnectResult::Connected(c) => c,
+                    ConnectResult::Shutdown => return,
+                    ConnectResult::GaveUp => {
+                        warn!(
+                            url = %url,
+                            attempts = opts.max_attempts,
+                            "could not reach rendezvous; giving up"
+                        );
+                        return;
+                    }
+                };
+
+                let _ = inner.events.send(VaultEvent {
+                    kind: VaultEventKind::Connected,
+                });
+
+                // -- supervise phase: keep the conn alive until it dies or
+                //    the user calls disconnect() --
+                let closed = conn.closed_signal();
+                {
+                    let mut slot = inner.client.lock().await;
+                    *slot = Some(conn);
+                }
+                tokio::select! {
+                    _ = closed.wait() => {
+                        warn!(url = %url, "lost connection to rendezvous; will retry");
+                        let _ = inner.events.send(VaultEvent {
+                            kind: VaultEventKind::Disconnected,
+                        });
+                        // Drop the dead conn so the next loop installs a fresh one.
+                        let dead = inner.client.lock().await.take();
+                        if let Some(c) = dead {
+                            c.close().await;
+                        }
+                        continue 'outer;
+                    }
+                    _ = &mut shutdown_rx => {
+                        // disconnect() is racing with us — let it take the conn.
+                        return;
+                    }
+                }
+            }
+        });
+
+        *self.inner.reconnect_supervisor.lock().await = Some(ReconnectSupervisor {
+            shutdown_tx,
+            handle,
+        });
+        Ok(())
     }
 
     /// Bind the active server (`agentsync --listen`) on `addr`.

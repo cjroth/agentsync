@@ -1,6 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Address used when `--listen` is given without a value.
+pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1234";
+
 #[derive(Debug, Parser)]
 #[command(name = "agentsync", version, about = "Real-time directory sync engine")]
 pub struct Cli {
@@ -50,8 +53,9 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 pub struct WatchArgs {
     pub path: Option<PathBuf>,
-    /// Bind a websocket listener on ADDR (acts as rendezvous).
-    #[arg(long)]
+    /// Bind a websocket listener on ADDR (acts as rendezvous). If the flag is
+    /// passed without a value, defaults to `0.0.0.0:1234`.
+    #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_LISTEN_ADDR)]
     pub listen: Option<String>,
     /// Override the rendezvous URL configured in config.toml.
     #[arg(long)]
@@ -241,5 +245,36 @@ mod tests {
     fn dot_path_invokes_watch() {
         let raw = vec!["./vault".to_string()];
         assert_eq!(resolve_args(&raw)[0], "watch");
+    }
+
+    #[test]
+    fn listen_without_value_uses_default_addr() {
+        let cli = Cli::try_parse_from(["agentsync", "watch", "--listen"]).unwrap();
+        let listen = match cli.command {
+            Command::Watch(args) => args.listen,
+            _ => panic!("expected watch"),
+        };
+        assert_eq!(listen.as_deref(), Some(DEFAULT_LISTEN_ADDR));
+    }
+
+    #[test]
+    fn listen_with_explicit_value_keeps_it() {
+        let cli =
+            Cli::try_parse_from(["agentsync", "watch", "--listen", "127.0.0.1:9999"]).unwrap();
+        let listen = match cli.command {
+            Command::Watch(args) => args.listen,
+            _ => panic!("expected watch"),
+        };
+        assert_eq!(listen.as_deref(), Some("127.0.0.1:9999"));
+    }
+
+    #[test]
+    fn no_listen_flag_keeps_listen_none() {
+        let cli = Cli::try_parse_from(["agentsync", "watch"]).unwrap();
+        let listen = match cli.command {
+            Command::Watch(args) => args.listen,
+            _ => panic!("expected watch"),
+        };
+        assert!(listen.is_none());
     }
 }

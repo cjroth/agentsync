@@ -1,7 +1,7 @@
 use crate::cli::WatchArgs;
 use crate::commands::require_config;
 use crate::config;
-use agentsync_core::{OpenOptions, Vault};
+use agentsync_core::{OpenOptions, ReconnectOptions, Vault};
 use anyhow::{Context, Result};
 use tracing::info;
 
@@ -49,10 +49,14 @@ pub async fn run(args: WatchArgs) -> Result<()> {
         info!(addr = %bound, "listening for peers");
         println!("listening on ws://{}", bound);
     } else if let Some(url) = &rendezvous_url {
-        match vault.connect().await {
-            Ok(_) => println!("connected to rendezvous: {}", url),
-            Err(e) => tracing::warn!(error = %e, url, "could not connect to rendezvous"),
-        }
+        // Hand off to the supervisor: it does the initial connect with
+        // backoff and reconnects automatically if the rendezvous goes away.
+        // Returns immediately after spawning, so the watch loop can keep
+        // running while the connection stabilizes in the background.
+        vault
+            .connect_with_reconnect(ReconnectOptions::default())
+            .await?;
+        println!("connecting to rendezvous: {}", url);
     }
 
     println!("watching {}", path.display());

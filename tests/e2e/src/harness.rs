@@ -20,11 +20,13 @@ pub struct E2EVault {
     pub peers: Vec<Peer>,
 }
 
-/// One running `agentsync` process bound to a temp directory.
+/// One running `agentsync` process bound to a temp directory. `proc` is
+/// `None` when the peer has been killed (or hasn't been spawned yet) but the
+/// storage dir is being preserved for a later restart.
 pub struct Peer {
     pub name: String,
     pub dir: TempDir,
-    proc: Child,
+    proc: Option<Child>,
 }
 
 impl E2EVault {
@@ -75,7 +77,7 @@ impl E2EVault {
         let rendezvous = Peer {
             name: "rendezvous".into(),
             dir: rendezvous_dir,
-            proc: child,
+            proc: Some(child),
         };
 
         Ok(E2EVault {
@@ -110,7 +112,7 @@ impl E2EVault {
         self.peers.push(Peer {
             name: name.to_string(),
             dir,
-            proc: child,
+            proc: Some(child),
         });
         // Allow the freshly-connected peer to complete the initial sync round
         // before tests start writing.
@@ -132,10 +134,150 @@ impl E2EVault {
     /// Kill every spawned process. Drop also does this — call explicitly when
     /// you want a deterministic teardown point (or to surface errors).
     pub async fn shutdown(mut self) {
-        let _ = self.rendezvous.proc.kill().await;
-        for peer in &mut self.peers {
-            let _ = peer.proc.kill().await;
+        if let Some(c) = self.rendezvous.proc.as_mut() {
+            let _ = c.kill().await;
         }
+        for peer in &mut self.peers {
+            if let Some(c) = peer.proc.as_mut() {
+                let _ = c.kill().await;
+            }
+        }
+    }
+
+    /// Port the rendezvous bound to. Stable across kill/restart so callers can
+    /// exercise reconnect behavior without the OS picking a different port.
+    pub fn rendezvous_port(&self) -> u16 {
+        self.rendezvous_url
+            .strip_prefix("ws://")
+            .and_then(|rest| rest.rsplit_once(':'))
+            .and_then(|(_, p)| p.parse().ok())
+            .expect("malformed rendezvous URL")
+    }
+
+    /// Kill the rendezvous and wait for the OS to release its port. Storage
+    /// dir is preserved so `restart_rendezvous()` can resume the same vault.
+    pub async fn kill_rendezvous(&mut self) -> Result<()> {
+        if let Some(c) = self.rendezvous.proc.as_mut() {
+            let _ = c.kill().await;
+            let _ = c.wait().await;
+        }
+        self.rendezvous.proc = None;
+        Ok(())
+    }
+
+    /// Spawn a fresh rendezvous bound to the original port + storage dir.
+    pub async fn restart_rendezvous(&mut self) -> Result<()> {
+        let port = self.rendezvous_port();
+        let mut cmd = base_command(&self.binary, self.rendezvous.dir.path(), &self.vault_key_b64);
+        cmd.arg("--listen").arg(format!("127.0.0.1:{}", port));
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("respawn rendezvous")?;
+        let bound_port = read_listen_port(&mut child)
+            .await
+            .context("waiting for rendezvous to rebind")?;
+        if bound_port != port {
+            bail!("rendezvous rebound on a different port: wanted {port}, got {bound_port}");
+        }
+        spawn_log_drainer(&mut child, "rendezvous");
+        self.rendezvous.proc = Some(child);
+        Ok(())
+    }
+
+    /// Like `new()` but does not spawn the rendezvous process. The vault
+    /// state is created on disk and a free port is reserved (then released)
+    /// so a peer can be pointed at it before the rendezvous is up. Use
+    /// `start_rendezvous()` when ready.
+    pub async fn prepared_offline() -> Result<Self> {
+        let binary = locate_binary()?;
+        let rendezvous_dir = TempDir::new()?;
+        let storage = rendezvous_dir.path().join(".agentsync");
+        let vault_key: VaultKey = generate_vault_key();
+        let (vault, created) = Vault::create(CreateOptions {
+            rendezvous_url: None,
+            vault_key: Some(vault_key),
+            storage_path: storage.clone(),
+        })
+        .await?;
+        vault.flush().await?;
+        drop(vault);
+
+        let vault_id = created.vault_id;
+        let vault_key_b64 = encode_key(&created.vault_key);
+        write_config(rendezvous_dir.path(), &vault_id, None)?;
+
+        // Reserve a free port by binding then immediately releasing it.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("reserve free port")?;
+        let port = probe.local_addr()?.port();
+        drop(probe);
+
+        let rendezvous_url = format!("ws://127.0.0.1:{}", port);
+        let rendezvous = Peer {
+            name: "rendezvous".into(),
+            dir: rendezvous_dir,
+            proc: None,
+        };
+
+        Ok(E2EVault {
+            binary,
+            vault_id,
+            vault_key_b64,
+            rendezvous_url,
+            rendezvous,
+            peers: Vec::new(),
+        })
+    }
+
+    /// Spawn the rendezvous process for an `E2EVault` created via
+    /// `prepared_offline()`. Errors if the rendezvous is already running.
+    pub async fn start_rendezvous(&mut self) -> Result<()> {
+        if self.rendezvous.proc.is_some() {
+            bail!("rendezvous already running");
+        }
+        let port = self.rendezvous_port();
+        let mut cmd = base_command(&self.binary, self.rendezvous.dir.path(), &self.vault_key_b64);
+        cmd.arg("--listen").arg(format!("127.0.0.1:{}", port));
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn rendezvous")?;
+        let bound_port = read_listen_port(&mut child)
+            .await
+            .context("waiting for rendezvous to bind")?;
+        if bound_port != port {
+            bail!("rendezvous bound a different port: wanted {port}, got {bound_port}");
+        }
+        spawn_log_drainer(&mut child, "rendezvous");
+        self.rendezvous.proc = Some(child);
+        Ok(())
+    }
+
+    /// Spawn a peer without waiting for it to reach the watching state. The
+    /// returned index can be used to address the peer; the caller is
+    /// responsible for waiting on whatever it needs to observe.
+    pub async fn add_peer_without_waiting(&mut self, name: &str) -> Result<usize> {
+        let dir = TempDir::new()?;
+        write_config(dir.path(), &self.vault_id, Some(&self.rendezvous_url))?;
+
+        let mut cmd = base_command(&self.binary, dir.path(), &self.vault_key_b64);
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn peer {}", name))?;
+
+        spawn_log_drainer(&mut child, name);
+
+        self.peers.push(Peer {
+            name: name.to_string(),
+            dir,
+            proc: Some(child),
+        });
+        Ok(self.peers.len() - 1)
     }
 }
 
