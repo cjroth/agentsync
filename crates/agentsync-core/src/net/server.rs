@@ -1,7 +1,7 @@
 use crate::auth::{verify_auth_token, VaultKey};
 use crate::error::{Error, Result};
 use crate::net::client::handle_inbound;
-use crate::net::protocol::{Frame, HelloOp};
+use crate::net::protocol::Frame;
 use crate::vault::SyncHandle;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;

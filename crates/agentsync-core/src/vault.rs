@@ -1,4 +1,4 @@
-use crate::auth::{decode_key, encode_key, generate_vault_key, VaultKey, VAULT_KEY_LEN};
+use crate::auth::{encode_key, generate_vault_key, VaultKey};
 use crate::doc::{content_hash, Doc, FileKind, FileMeta, Label};
 use crate::error::{Error, Result};
 use crate::fs::adapter::{FilesystemAdapter, FsEvent};
@@ -7,7 +7,6 @@ use crate::fs::node_adapter::NodeFsAdapter;
 use crate::net::client::ClientConn;
 use crate::net::protocol::Frame;
 use crate::net::server::Server;
-use crate::path as path_norm;
 use crate::store::{BlobStore, DocStore, SnapshotIndex};
 use async_trait::async_trait;
 use automerge::sync::{self as amsync, SyncDoc};
@@ -19,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tokio::time::{interval, Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 pub type VaultId = String;
@@ -477,7 +476,7 @@ impl Vault {
         let mut binding = Binding::new(path, opts.clone(), adapter.clone());
 
         // Set up watcher channel.
-        let (tx, mut rx) = mpsc::unbounded_channel::<FsEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<FsEvent>();
         let watcher = adapter.watch(path, tx)?;
         binding.set_watcher(watcher);
         let binding = Arc::new(binding);
@@ -579,7 +578,7 @@ impl SyncHandle for VaultSyncHandle {
             None => return Ok(None),
         };
         let mut doc = self.inner.doc.lock().await;
-        let mut sd = doc.inner.sync();
+        let sd = doc.inner.sync();
         let msg = sd.generate_sync_message(&mut slot.state);
         let bytes = msg.map(|m| m.encode());
         tracing::debug!(peer_id, has = bytes.is_some(), "generated sync message");

@@ -18,7 +18,6 @@ use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
     ActorId, AutoCommit, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
 };
-use automerge::ReadDocAt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -246,20 +245,6 @@ pub(crate) fn get_int(doc: &mut impl ReadDoc, obj: &ObjId, key: &str) -> Result<
     }
 }
 
-pub(crate) fn get_bytes(doc: &mut impl ReadDoc, obj: &ObjId, key: &str) -> Result<Option<Vec<u8>>> {
-    match doc.get(obj, key)? {
-        Some((Value::Scalar(s), _)) => match s.as_ref() {
-            ScalarValue::Bytes(v) => Ok(Some(v.clone())),
-            ScalarValue::Null => Ok(None),
-            other => Err(Error::Other(format!(
-                "expected bytes at {}, got {:?}",
-                key, other
-            ))),
-        },
-        _ => Ok(None),
-    }
-}
-
 pub(crate) fn get_text(doc: &mut impl ReadDoc, obj: &ObjId, key: &str) -> Result<Option<(ObjId, String)>> {
     match doc.get(obj, key)? {
         Some((Value::Object(ObjType::Text), id)) => {
@@ -282,6 +267,4 @@ pub(crate) fn map_keys(doc: &mut impl ReadDoc, obj: &ObjId) -> Vec<String> {
     doc.keys(obj).collect()
 }
 
-pub use directories::*;
-pub use files::*;
 pub use history::*;

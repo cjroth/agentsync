@@ -7,7 +7,6 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 /// One end-to-end scenario: a rendezvous peer + zero-or-more client peers,

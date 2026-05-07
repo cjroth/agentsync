@@ -7,7 +7,7 @@ use anyhow::Result;
 pub async fn run(args: SnapshotArgs) -> Result<()> {
     match args.op {
         SnapshotOp::Create { label, path } => {
-            let mut vault = open(&path).await?;
+            let vault = open(&path).await?;
             vault.create_label(&label).await?;
             vault.flush().await?;
             println!("snapshot created: {}", label);
@@ -35,7 +35,7 @@ pub async fn run(args: SnapshotArgs) -> Result<()> {
             println!("restored to snapshot: {}", label);
         }
         SnapshotOp::Delete { label, path } => {
-            let mut vault = open(&path).await?;
+            let vault = open(&path).await?;
             vault.delete_label(&label).await?;
             vault.flush().await?;
             println!("snapshot deleted: {}", label);

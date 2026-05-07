@@ -1,13 +1,10 @@
-use crate::doc::content_hash;
-use crate::error::{Error, Result};
-use crate::fs::adapter::{FilesystemAdapter, FsEvent, Watcher};
-use crate::fs::node_adapter::NodeFsAdapter;
+use crate::fs::adapter::{FilesystemAdapter, Watcher};
 use crate::fs::suppression::DirtySet;
 use crate::path as path_norm;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 
 /// Configuration for binding the vault to a local directory.
 #[derive(Debug, Clone)]

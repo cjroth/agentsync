@@ -4,7 +4,7 @@ use crate::fs::adapter::{DirEntry, FilesystemAdapter, FsEvent, Watcher};
 use async_trait::async_trait;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify::Watcher as NotifyWatcher;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::mpsc;
