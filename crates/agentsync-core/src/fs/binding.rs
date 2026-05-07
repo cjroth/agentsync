@@ -1,7 +1,7 @@
 use crate::fs::adapter::{FilesystemAdapter, Watcher};
 use crate::fs::suppression::DirtySet;
 use crate::path as path_norm;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -81,6 +81,10 @@ pub struct Binding {
     /// the user just saved has already been captured by the doc, so it's safe
     /// to overwrite with the doc's (possibly merged) content.
     pub(crate) last_ingested: Arc<Mutex<HashMap<String, String>>>,
+    /// Set of directory paths the materializer has created on disk (or
+    /// confirmed already exist after the initial scan). Used to detect when a
+    /// directory has been deleted in the doc and should be removed locally.
+    pub(crate) materialized_dirs: Arc<Mutex<HashSet<String>>>,
     _watcher: Option<Box<dyn Watcher>>,
 }
 
@@ -97,6 +101,7 @@ impl Binding {
             dirty: Arc::new(Mutex::new(DirtySet::new())),
             materialized: Arc::new(Mutex::new(HashMap::new())),
             last_ingested: Arc::new(Mutex::new(HashMap::new())),
+            materialized_dirs: Arc::new(Mutex::new(HashSet::new())),
             _watcher: None,
         }
     }
@@ -133,6 +138,23 @@ impl Binding {
         Some(normalized)
     }
 
+    /// Like `fs_path_to_vault_path` but applies only the exclude rules.
+    /// Directories are not subject to the file-extension include filter, so
+    /// e.g. an empty `notes/` folder still syncs even when only `*.md` files
+    /// are included.
+    pub fn fs_path_to_vault_dir_path(&self, abs: &Path) -> Option<String> {
+        let rel = abs.strip_prefix(&self.root).ok()?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str.is_empty() {
+            return None;
+        }
+        let normalized = path_norm::normalize(&rel_str).ok()?;
+        if !self.dir_path_allowed(&normalized) {
+            return None;
+        }
+        Some(normalized)
+    }
+
     pub fn vault_path_to_fs_path(&self, vault: &str) -> PathBuf {
         let mut p = self.root.clone();
         for seg in vault.split('/') {
@@ -153,6 +175,16 @@ impl Binding {
             return false;
         }
         true
+    }
+
+    /// Whether a directory path is allowed. Only the exclude list applies —
+    /// the include list is meant for filtering files by extension and would
+    /// reject every directory if applied here.
+    pub(crate) fn dir_path_allowed(&self, path: &str) -> bool {
+        if self.opts.exclude_patterns.is_empty() {
+            return true;
+        }
+        !glob_match_any(&self.opts.exclude_patterns, path)
     }
 
     pub(crate) fn is_text_extension(&self, path: &str) -> bool {

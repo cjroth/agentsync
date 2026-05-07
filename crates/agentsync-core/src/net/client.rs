@@ -4,7 +4,8 @@ use crate::net::protocol::{Frame, HelloOp};
 use crate::vault::SyncHandle;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
@@ -49,7 +50,53 @@ pub async fn discover_vault_id(url: &str, vault_key: VaultKey) -> Result<String>
 }
 
 pub struct ClientConn {
-    pub _tasks: Vec<JoinHandle<()>>,
+    close_tx: Option<oneshot::Sender<()>>,
+    writer_task: Option<JoinHandle<()>>,
+    reader_task: Option<JoinHandle<()>>,
+    notif_task: Option<JoinHandle<()>>,
+    sync_handle: Arc<dyn SyncHandle>,
+    peer_id: u64,
+}
+
+impl ClientConn {
+    /// Send a WebSocket Close frame to the peer and tear down the connection.
+    /// The writer task is awaited (with a short timeout) so the Close frame
+    /// actually goes out on the wire before the underlying socket closes.
+    pub async fn close(mut self) {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(h) = self.reader_task.take() {
+            h.abort();
+        }
+        if let Some(h) = self.notif_task.take() {
+            h.abort();
+        }
+        if let Some(h) = self.writer_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
+        }
+        // Idempotent — the reader task may have already done this on a
+        // server-initiated close.
+        self.sync_handle.unregister_peer(self.peer_id).await;
+    }
+}
+
+impl Drop for ClientConn {
+    fn drop(&mut self) {
+        // Best-effort: nudge the writer task so it has a chance to flush the
+        // Close frame before the runtime tears tasks down. Drop is sync so we
+        // can't await; callers who care about graceful close should call
+        // `close().await`.
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(h) = self.reader_task.take() {
+            h.abort();
+        }
+        if let Some(h) = self.notif_task.take() {
+            h.abort();
+        }
+    }
 }
 
 impl ClientConn {
@@ -104,18 +151,31 @@ impl ClientConn {
             let _ = out_tx.send(Frame::Sync { bytes: msg });
         }
 
-        // Writer task: pump frames out.
+        // Writer task: pump frames out. Selects on a oneshot close signal so
+        // graceful disconnect can interrupt the loop and emit a Close frame
+        // before the underlying socket goes away.
+        let (close_tx, mut close_rx) = oneshot::channel::<()>();
         let writer_task = tokio::spawn(async move {
-            while let Some(frame) = out_rx.recv().await {
-                let bytes = match frame.encode() {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(error=%e, "encode frame");
-                        continue;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut close_rx => break,
+                    frame = out_rx.recv() => match frame {
+                        Some(frame) => {
+                            let bytes = match frame.encode() {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    warn!(error=%e, "encode frame");
+                                    continue;
+                                }
+                            };
+                            if writer.send(Message::binary(bytes)).await.is_err() {
+                                // Peer is gone — skip the Close attempt.
+                                return;
+                            }
+                        }
+                        None => break,
                     }
-                };
-                if writer.send(Message::binary(bytes)).await.is_err() {
-                    break;
                 }
             }
             let _ = writer.send(Message::Close(None)).await;
@@ -173,7 +233,12 @@ impl ClientConn {
         });
 
         Ok(ClientConn {
-            _tasks: vec![writer_task, reader_task, notif_task],
+            close_tx: Some(close_tx),
+            writer_task: Some(writer_task),
+            reader_task: Some(reader_task),
+            notif_task: Some(notif_task),
+            sync_handle,
+            peer_id,
         })
     }
 }

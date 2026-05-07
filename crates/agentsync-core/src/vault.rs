@@ -346,6 +346,11 @@ impl Vault {
         Ok(())
     }
 
+    pub async fn list_directories(&self) -> Result<Vec<crate::doc::DirectoryMeta>> {
+        let mut doc = self.inner.doc.lock().await;
+        doc.list_directories()
+    }
+
     // ---------- history ops ----------
 
     pub async fn create_label(&self, name: &str) -> Result<()> {
@@ -436,9 +441,14 @@ impl Vault {
         Ok(())
     }
 
-    /// Drop the active outbound connection (if any).
+    /// Drop the active outbound connection (if any). Sends a WebSocket Close
+    /// frame to the peer before tearing down the socket so the remote side
+    /// observes a clean shutdown rather than a TCP reset.
     pub async fn disconnect(&mut self) {
-        *self.inner.client.lock().await = None;
+        let conn = self.inner.client.lock().await.take();
+        if let Some(c) = conn {
+            c.close().await;
+        }
         let _ = self.inner.events.send(VaultEvent {
             kind: VaultEventKind::Disconnected,
         });
@@ -458,6 +468,16 @@ impl Vault {
         let bound = server.bound_addr;
         *self.inner.server.lock().await = Some(server);
         Ok(bound)
+    }
+
+    /// Stop accepting peers and gracefully close every active connection.
+    /// Each peer's writer sends a Close frame so the remote side observes a
+    /// clean shutdown.
+    pub async fn unlisten(&mut self) {
+        let server = self.inner.server.lock().await.take();
+        if let Some(s) = server {
+            s.shutdown().await;
+        }
     }
 
     pub fn notify_doc_changed(&self) {
@@ -531,10 +551,20 @@ impl Vault {
         materialize_inner(&self.inner, binding).await
     }
 
-    /// Save and gracefully shut down. Drop alone is also fine.
-    pub async fn close(self) -> Result<()> {
+    /// Save and gracefully shut down. Tears down any active outbound or
+    /// inbound websocket connections with proper Close frames before
+    /// flushing the doc to disk.
+    pub async fn close(mut self) -> Result<()> {
+        self.disconnect().await;
+        self.unlisten().await;
         self.flush().await?;
         Ok(())
+    }
+
+    /// Number of currently-registered peer slots (one per active connection).
+    /// Test helper; production code should subscribe to `VaultEvent` instead.
+    pub async fn peer_count(&self) -> usize {
+        self.inner.peers.lock().await.len()
     }
 }
 
@@ -700,13 +730,37 @@ async fn flush_expired(
 // -- materialization (doc -> disk) --
 
 async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> Result<()> {
-    let files = {
+    let (files, dirs) = {
         let mut doc = inner.doc.lock().await;
-        doc.list_files()?
+        (doc.list_files()?, doc.list_directories()?)
     };
     tracing::trace!(count = files.len(), "materialize: scanning live files");
     let live: HashMap<String, FileMeta> =
         files.into_iter().map(|m| (m.path.clone(), m)).collect();
+    let live_dirs: std::collections::HashSet<String> =
+        dirs.into_iter().map(|d| d.path).collect();
+
+    // Create any directories the doc has but the materializer hasn't observed
+    // on disk yet. Skip ones we've already materialized — re-creating them
+    // every tick would race a user-driven remove (their `rmdir` would be
+    // silently undone before the fs event has a chance to tombstone the doc
+    // entry).
+    {
+        let mut materialized_dirs = binding.materialized_dirs.lock().await;
+        let mut ordered: Vec<&String> = live_dirs
+            .iter()
+            .filter(|p| !materialized_dirs.contains(*p))
+            .collect();
+        ordered.sort_by_key(|p| (p.matches('/').count(), p.as_str().to_string()));
+        for path in ordered {
+            let abs = binding.vault_path_to_fs_path(path);
+            if let Err(e) = tokio::fs::create_dir_all(&abs).await {
+                warn!(path, error=%e, "create directory");
+                continue;
+            }
+            materialized_dirs.insert(path.clone());
+        }
+    }
 
     // Snapshot of what we currently believe is on disk.
     let existing: HashMap<String, String> = binding.materialized.lock().await.clone();
@@ -856,6 +910,39 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         .lock()
         .await
         .retain(|p, _| live.contains_key(p));
+
+    // Directory removals. A directory we previously materialized but is no
+    // longer live in the doc should disappear from disk too. We only attempt
+    // to remove empty directories — anything left under them either belongs
+    // to an excluded subtree (e.g. .git) or is a file we deferred deleting.
+    // Process deepest paths first so children are gone before parents.
+    {
+        let mut materialized_dirs = binding.materialized_dirs.lock().await;
+        let to_remove: Vec<String> = materialized_dirs
+            .iter()
+            .filter(|p| !live_dirs.contains(*p))
+            .cloned()
+            .collect();
+        let mut ordered = to_remove.clone();
+        ordered.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
+        for path in ordered {
+            let abs = binding.vault_path_to_fs_path(&path);
+            match tokio::fs::remove_dir(&abs).await {
+                Ok(_) => {
+                    materialized_dirs.remove(&path);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    materialized_dirs.remove(&path);
+                }
+                Err(e) => {
+                    // Most likely the dir isn't empty (deferred file delete or
+                    // a non-tracked file). Leave it on disk; we'll retry on
+                    // the next materialize tick.
+                    tracing::debug!(path, error=%e, "materialize: skipping non-empty dir");
+                }
+            }
+        }
+    }
     Ok(())
 }
 

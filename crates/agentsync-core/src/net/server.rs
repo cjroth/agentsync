@@ -6,8 +6,9 @@ use crate::vault::SyncHandle;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -16,7 +17,9 @@ use tracing::{debug, info, warn};
 /// `agentsync --listen` server. Accepts websocket connections from peers and
 /// bridges each one to its own SyncState within the local vault.
 pub struct Server {
-    pub _accept: JoinHandle<()>,
+    accept_task: Option<JoinHandle<()>>,
+    shutdown_tx: broadcast::Sender<()>,
+    peer_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub bound_addr: SocketAddr,
 }
 
@@ -31,32 +34,82 @@ impl Server {
         let bound = listener.local_addr()?;
         info!(addr = %bound, vault_id, "rendezvous listening");
 
+        let (shutdown_tx, _) = broadcast::channel::<()>(8);
+        let peer_tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let accept_shutdown_tx = shutdown_tx.clone();
+        let mut accept_shutdown = shutdown_tx.subscribe();
+        let peer_tasks_for_accept = peer_tasks.clone();
         let accept = tokio::spawn(async move {
             loop {
-                let (stream, peer_addr) = match listener.accept().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!(error=%e, "accept");
-                        continue;
+                tokio::select! {
+                    biased;
+                    _ = accept_shutdown.recv() => break,
+                    res = listener.accept() => {
+                        let (stream, peer_addr) = match res {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!(error=%e, "accept");
+                                continue;
+                            }
+                        };
+                        let vault_id = vault_id.clone();
+                        let vault_key = vault_key;
+                        let sync_handle = sync_handle.clone();
+                        let peer_shutdown = accept_shutdown_tx.subscribe();
+                        let task = tokio::spawn(async move {
+                            if let Err(e) = handle_peer(
+                                stream,
+                                peer_addr,
+                                vault_id,
+                                vault_key,
+                                sync_handle,
+                                peer_shutdown,
+                            )
+                            .await
+                            {
+                                warn!(error=%e, "peer connection ended");
+                            }
+                        });
+                        peer_tasks_for_accept.lock().await.push(task);
                     }
-                };
-                let vault_id = vault_id.clone();
-                let vault_key = vault_key;
-                let sync_handle = sync_handle.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_peer(stream, peer_addr, vault_id, vault_key, sync_handle).await
-                    {
-                        warn!(error=%e, "peer connection ended");
-                    }
-                });
+                }
             }
         });
 
         Ok(Server {
-            _accept: accept,
+            accept_task: Some(accept),
+            shutdown_tx,
+            peer_tasks,
             bound_addr: bound,
         })
+    }
+
+    /// Stop accepting new peers and gracefully close every active peer
+    /// connection (each writer sends a Close frame before the socket is torn
+    /// down). Bounded by a short timeout so an unresponsive peer can't hang
+    /// shutdown indefinitely.
+    pub async fn shutdown(mut self) {
+        let _ = self.shutdown_tx.send(());
+        if let Some(h) = self.accept_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
+        }
+        let mut tasks = self.peer_tasks.lock().await;
+        for h in tasks.drain(..) {
+            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
+        }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(());
+        if let Some(h) = self.accept_task.take() {
+            h.abort();
+        }
+        // Outstanding peer_tasks: signaled via broadcast above. We can't await
+        // in Drop, so they'll race with runtime teardown. Callers that care
+        // about graceful close should call `shutdown().await`.
     }
 }
 
@@ -66,6 +119,7 @@ async fn handle_peer(
     vault_id: String,
     vault_key: VaultKey,
     sync_handle: Arc<dyn SyncHandle>,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
     let ws = accept_async(stream).await?;
     let (mut writer, mut reader) = ws.split();
@@ -120,18 +174,28 @@ async fn handle_peer(
     }
 
     let writer_task = tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
-            let bytes = match frame.encode() {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error=%e, "encode frame");
-                    continue;
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => break,
+                frame = out_rx.recv() => match frame {
+                    Some(frame) => {
+                        let bytes = match frame.encode() {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!(error=%e, "encode frame");
+                                continue;
+                            }
+                        };
+                        if writer.send(Message::binary(bytes)).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => break,
                 }
-            };
-            if writer.send(Message::binary(bytes)).await.is_err() {
-                break;
             }
         }
+        let _ = writer.send(Message::Close(None)).await;
         let _ = writer.close().await;
     });
 
@@ -184,6 +248,17 @@ async fn handle_peer(
         }
     });
 
-    let _ = tokio::join!(writer_task, reader_task, notif_task);
+    // The writer task is the primary lifecycle driver: it exits on graceful
+    // shutdown, on a peer-side close, or on a write error. When it does, tear
+    // down the others. The reader will exit naturally once writer closes its
+    // side of the websocket (TCP EOF), so we wait briefly for it; notif has
+    // a forever loop so we abort it.
+    let _ = writer_task.await;
+    notif_task.abort();
+    let _ = tokio::time::timeout(Duration::from_millis(500), reader_task).await;
+    // Idempotent — reader_task may have already done this on a peer-initiated
+    // close. Calling it here too covers the shutdown-aborted-reader case.
+    sync_handle.unregister_peer(peer_id).await;
+    debug!(peer_id, "peer handler exited");
     Ok(())
 }

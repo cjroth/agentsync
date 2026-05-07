@@ -42,3 +42,11 @@ path = "tests/data_loss_regressions.rs"
 [[test]]
 name = "vault_id_discovery"
 path = "tests/vault_id_discovery.rs"
+
+[[test]]
+name = "folder_sync"
+path = "tests/folder_sync.rs"
+
+[[test]]
+name = "graceful_close"
+path = "tests/graceful_close.rs"

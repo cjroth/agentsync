@@ -13,15 +13,66 @@ pub(crate) async fn initial_scan(inner: &Arc<VaultInner>, binding: &Arc<Binding>
     let root = binding.root().to_path_buf();
     let walker = WalkDir::new(&root).follow_links(false).into_iter();
     for entry in walker.filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
         let abs = entry.path().to_path_buf();
-        let vault_path = match binding.fs_path_to_vault_path(&abs) {
-            Some(p) => p,
-            None => continue,
-        };
-        ingest_file(inner, binding, &vault_path).await?;
+        if entry.file_type().is_dir() {
+            // The root itself isn't a directory we track inside the doc.
+            if abs == root {
+                continue;
+            }
+            if let Some(vault_path) = binding.fs_path_to_vault_dir_path(&abs) {
+                ingest_directory(inner, binding, &vault_path).await?;
+            }
+        } else if entry.file_type().is_file() {
+            if let Some(vault_path) = binding.fs_path_to_vault_path(&abs) {
+                ingest_file(inner, binding, &vault_path).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn ingest_directory(
+    inner: &Arc<VaultInner>,
+    binding: &Arc<Binding>,
+    vault_path: &str,
+) -> Result<()> {
+    // Walk the entire subtree. notify's recursive watcher can miss events
+    // for entries created inside a freshly-made subdirectory before the
+    // watch on it is installed (the writes can land before the kernel adds
+    // the inotify watch). Re-scanning the subtree closes that race for both
+    // nested dirs and the files inside them.
+    let abs_root = binding.vault_path_to_fs_path(vault_path);
+    let mut changed = false;
+    for entry in WalkDir::new(&abs_root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+        let entry_abs = entry.path().to_path_buf();
+        if entry.file_type().is_dir() {
+            let p = match binding.fs_path_to_vault_dir_path(&entry_abs) {
+                Some(p) => p,
+                None => continue,
+            };
+            let mut doc = inner.doc.lock().await;
+            let already = doc.find_directory_by_path(&p)?.is_some();
+            if !already {
+                doc.create_directory(&p)?;
+                changed = true;
+            }
+            drop(doc);
+            binding.materialized_dirs.lock().await.insert(p);
+        } else if entry.file_type().is_file() {
+            let p = match binding.fs_path_to_vault_path(&entry_abs) {
+                Some(p) => p,
+                None => continue,
+            };
+            ingest_file(inner, binding, &p).await?;
+        }
+    }
+    if changed {
+        inner.doc_changed.notify_waiters();
+        let _ = inner.events.send(VaultEvent {
+            kind: VaultEventKind::FileChanged {
+                path: vault_path.to_string(),
+            },
+        });
     }
     Ok(())
 }
@@ -33,20 +84,55 @@ pub(crate) async fn handle_fs_event(
 ) -> Result<()> {
     match event {
         FsEvent::Touched(abs) => {
-            if let Some(vault_path) = binding.fs_path_to_vault_path(&abs) {
+            // Resolve disk type up-front: a single notify event might be for
+            // a file or a directory (mkdir vs touch). We dispatch by kind,
+            // not by path filter.
+            let is_dir = match tokio::fs::metadata(&abs).await {
+                Ok(md) => md.is_dir(),
+                Err(_) => return Ok(()),
+            };
+            if is_dir {
+                if let Some(vault_path) = binding.fs_path_to_vault_dir_path(&abs) {
+                    ingest_directory(inner, binding, &vault_path).await?;
+                }
+            } else if let Some(vault_path) = binding.fs_path_to_vault_path(&abs) {
                 ingest_file(inner, binding, &vault_path).await?;
             }
         }
         FsEvent::Removed(abs) => {
+            // Disk is gone — but it may still appear if the event raced an
+            // atomic rename. Re-check.
+            if binding.adapter().exists(&abs).await {
+                return Ok(());
+            }
+            // The path may correspond to either a file or a directory in
+            // the doc. File deletes go through delete_file (single-path).
+            // Directory deletes cascade so a recursive rm is captured even
+            // when child events haven't been processed yet.
             if let Some(vault_path) = binding.fs_path_to_vault_path(&abs) {
-                let exists_on_disk = binding.adapter().exists(&abs).await;
-                if exists_on_disk {
-                    return Ok(());
-                }
                 let mut doc = inner.doc.lock().await;
                 if doc.file_exists(&vault_path) {
                     doc.delete_file(&vault_path)?;
                     drop(doc);
+                    inner.doc_changed.notify_waiters();
+                    let _ = inner.events.send(VaultEvent {
+                        kind: VaultEventKind::FileChanged {
+                            path: vault_path.clone(),
+                        },
+                    });
+                    return Ok(());
+                }
+            }
+            if let Some(vault_path) = binding.fs_path_to_vault_dir_path(&abs) {
+                let mut doc = inner.doc.lock().await;
+                if doc.find_directory_by_path(&vault_path)?.is_some() {
+                    doc.delete_directory(&vault_path, true)?;
+                    drop(doc);
+                    binding
+                        .materialized_dirs
+                        .lock()
+                        .await
+                        .remove(&vault_path);
                     inner.doc_changed.notify_waiters();
                     let _ = inner.events.send(VaultEvent {
                         kind: VaultEventKind::FileChanged { path: vault_path },

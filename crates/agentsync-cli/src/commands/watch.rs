@@ -61,6 +61,8 @@ pub async fn run(args: WatchArgs) -> Result<()> {
     // Keep running until SIGINT.
     tokio::signal::ctrl_c().await?;
     println!("shutting down");
+    vault.disconnect().await;
+    vault.unlisten().await;
     vault.flush().await?;
     Ok(())
 }
