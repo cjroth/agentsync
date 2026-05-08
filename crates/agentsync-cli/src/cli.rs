@@ -6,24 +6,31 @@ pub use agentsync_core::DEFAULT_LISTEN_ADDR;
 #[derive(Debug, Parser)]
 #[command(name = "agentsync", version, about = "Real-time directory sync engine")]
 pub struct Cli {
+    /// Operate on the vault at this directory. Falls back to the
+    /// `AGENTSYNC_CWD` env var, then the current working directory.
+    /// Applies to every subcommand except `clone`, which takes its own
+    /// destination directory.
+    #[arg(long, global = true, env = "AGENTSYNC_CWD", default_value = ".")]
+    pub cwd: PathBuf,
+
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Initialize a new vault in the current directory.
+    /// Initialize a new vault in the working directory (`--cwd`).
     Init(InitArgs),
-    /// Watch and sync a directory (default operation).
+    /// Watch and sync the vault at `--cwd` (default operation).
     Watch(WatchArgs),
     /// Clone an existing vault into a local directory.
     Clone(CloneArgs),
     /// Print connection state and counts.
-    Status(StatusArgs),
+    Status,
     /// One-shot scan & push.
-    Push(PushPullArgs),
+    Push,
     /// One-shot pull.
-    Pull(PushPullArgs),
+    Pull,
     /// Restore the vault to a wall-clock timestamp.
     #[command(name = "restore-at")]
     RestoreAt(RestoreAtArgs),
@@ -32,14 +39,14 @@ pub enum Command {
     /// Show changes between two points in history.
     Diff(DiffArgs),
     /// Run a compaction pass.
-    Compact(CompactArgs),
+    Compact,
     /// Manage vault keys.
     Key(KeyArgs),
     /// Manage the pinned hub identity (`hub_pubkey`).
     Hub(HubArgs),
-    /// Generate shell completions for tab-completing subcommands and flags.
-    /// Pipe the output into your shell's completions directory, e.g.
-    /// `agentsync completions bash > /etc/bash_completion.d/agentsync`.
+    /// Generate (or install) shell completions for tab-completing
+    /// subcommands and flags. With `--install`, writes the script to the
+    /// conventional location for the chosen shell instead of stdout.
     Completions(CompletionsArgs),
     /// Print version.
     Version,
@@ -49,6 +56,13 @@ pub enum Command {
 pub struct CompletionsArgs {
     /// Shell to emit completions for.
     pub shell: ShellKind,
+    /// Write the completion script to this shell's conventional location
+    /// instead of stdout. Prints the destination path on success along with
+    /// any one-time `.zshrc`/`.bashrc` line you may need to add. Supported
+    /// for `bash`, `zsh`, and `fish`; for `powershell` and `elvish` pipe
+    /// stdout into your profile.
+    #[arg(long)]
+    pub install: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -56,6 +70,7 @@ pub enum ShellKind {
     Bash,
     Zsh,
     Fish,
+    #[value(alias = "powershell", alias = "pwsh")]
     PowerShell,
     Elvish,
 }
@@ -72,20 +87,12 @@ pub enum HubOp {
     Trust {
         /// Pubkey in `ssh-ed25519 <base64>` form.
         pubkey: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
     },
     /// Clear the pinned hub identity. Next connect will trust whatever the
     /// hub presents.
-    Forget {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
+    Forget,
     /// Show the currently pinned hub identity.
-    Show {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
+    Show,
 }
 
 #[derive(Debug, Args)]
@@ -107,13 +114,10 @@ pub struct InitArgs {
     /// directory isn't accidentally committed or re-synced.
     #[arg(long)]
     pub no_ignore_files: bool,
-    #[arg(long, default_value = ".")]
-    pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]
 pub struct WatchArgs {
-    pub path: Option<PathBuf>,
     /// Bind a websocket listener on ADDR (acts as rendezvous). If the flag is
     /// passed without a value, defaults to `0.0.0.0:1234`.
     #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_LISTEN_ADDR)]
@@ -169,23 +173,9 @@ pub struct CloneArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct StatusArgs {
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub struct PushPullArgs {
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
-}
-
-#[derive(Debug, Args)]
 pub struct RestoreAtArgs {
     /// RFC3339 timestamp or epoch milliseconds.
     pub timestamp: String,
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -196,39 +186,16 @@ pub struct SnapshotArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SnapshotOp {
-    Create {
-        label: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    List {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    Restore {
-        label: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    Delete {
-        label: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
+    Create { label: String },
+    List,
+    Restore { label: String },
+    Delete { label: String },
 }
 
 #[derive(Debug, Args)]
 pub struct DiffArgs {
     pub from: String,
     pub to: Option<String>,
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub struct CompactArgs {
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -242,8 +209,6 @@ pub enum KeyOp {
     /// Generate a fresh ed25519 identity for this vault. Refuses to overwrite
     /// an existing identity file.
     Generate {
-        #[arg(default_value = ".")]
-        path: PathBuf,
         /// Override the identity-secret path (default:
         /// `~/.agentsync/id_ed25519`).
         #[arg(long)]
@@ -251,10 +216,7 @@ pub enum KeyOp {
     },
     /// Print the local pubkey in `ssh-ed25519 ...` format, suitable for
     /// pasting into someone else's authorized_keys.
-    Show {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
+    Show,
 }
 
 const KNOWN_SUBCOMMANDS: &[&str] = &[
@@ -277,42 +239,82 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
 
 /// Implements the spec's argument resolution rules. Returns the actual argv
 /// (sans program name) that should be fed to the clap parser.
+///
+/// Two ergonomics on top of plain clap parsing:
+///   - Bare-path shortcut: `agentsync ./vault [extra]` is rewritten to
+///     `--cwd ./vault [extra]` so the global `--cwd` carries the directory.
+///     If `[extra]` doesn't include a subcommand, `watch` is inserted.
+///   - Default subcommand: when no subcommand appears anywhere in argv (e.g.
+///     `agentsync --listen 0.0.0.0:8443`), `watch` is prepended so the flag
+///     parses as a watch flag.
 pub fn resolve_args(raw: &[String]) -> Vec<String> {
     if raw.is_empty() {
         return vec!["watch".to_string()];
     }
-    // Top-level help/version flags should pass straight through to clap.
+    // Top-level help/version flags short-circuit in clap; pass through.
     if matches!(raw[0].as_str(), "--help" | "-h" | "--version" | "-V") {
         return raw.to_vec();
     }
-    if raw[0].starts_with("--") || raw[0].starts_with('-') {
-        // First arg is a flag → run watch with these flags.
-        let mut out = vec!["watch".to_string()];
-        out.extend(raw.iter().cloned());
-        return out;
+
+    // Lift a leading bare path into --cwd. Only when the token isn't itself
+    // a known subcommand — so `agentsync init` keeps meaning init even if a
+    // file named `init` happens to exist.
+    let mut head: Vec<String> = Vec::new();
+    let mut tail_start = 0usize;
+    if !raw[0].starts_with('-') && !KNOWN_SUBCOMMANDS.iter().any(|c| *c == raw[0]) {
+        let p = std::path::Path::new(&raw[0]);
+        let path_like = raw[0].starts_with('/')
+            || raw[0].starts_with('.')
+            || raw[0].starts_with('~')
+            || p.exists();
+        if path_like {
+            head.push("--cwd".to_string());
+            head.push(raw[0].clone());
+            tail_start = 1;
+        }
     }
-    if KNOWN_SUBCOMMANDS.iter().any(|c| *c == raw[0]) {
-        return raw.to_vec();
+
+    let tail = &raw[tail_start..];
+    let mut out = head;
+    if has_explicit_subcommand(tail) {
+        out.extend(tail.iter().cloned());
+    } else {
+        out.push("watch".to_string());
+        out.extend(tail.iter().cloned());
     }
-    // First arg looks path-like → watch <path> [flags...]
-    if raw[0].starts_with('/') || raw[0].starts_with('.') || raw[0].starts_with('~') {
-        let mut out = vec!["watch".to_string()];
-        out.extend(raw.iter().cloned());
-        return out;
+    out
+}
+
+/// Walk `args` looking for an explicit subcommand token. Skips
+/// `--cwd <value>` (and `--cwd=value`) and individual top-level flags.
+/// Other globals (`--help`, `--version`) don't take values; subcommand-local
+/// value-taking flags can't appear before a subcommand, so this approximation
+/// is sufficient.
+fn has_explicit_subcommand(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let t = &args[i];
+        if t == "--cwd" {
+            i += 2;
+            continue;
+        }
+        if t.starts_with("--cwd=") {
+            i += 1;
+            continue;
+        }
+        if t.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return KNOWN_SUBCOMMANDS.iter().any(|c| *c == t);
     }
-    let p = std::path::Path::new(&raw[0]);
-    if p.exists() {
-        let mut out = vec!["watch".to_string()];
-        out.extend(raw.iter().cloned());
-        return out;
-    }
-    // Fallthrough: treat as unknown subcommand and let clap error.
-    raw.to_vec()
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn empty_runs_watch() {
@@ -334,9 +336,35 @@ mod tests {
     }
 
     #[test]
-    fn dot_path_invokes_watch() {
+    fn dot_path_invokes_watch_with_cwd() {
         let raw = vec!["./vault".to_string()];
-        assert_eq!(resolve_args(&raw)[0], "watch");
+        let out = resolve_args(&raw);
+        assert_eq!(out, vec!["--cwd", "./vault", "watch"]);
+    }
+
+    #[test]
+    fn dot_path_with_subcommand_lifts_to_cwd() {
+        let raw = vec!["./vault".to_string(), "status".to_string()];
+        let out = resolve_args(&raw);
+        assert_eq!(out, vec!["--cwd", "./vault", "status"]);
+    }
+
+    #[test]
+    fn cwd_then_subcommand_preserved() {
+        let raw = vec![
+            "--cwd".to_string(),
+            "/tmp/v".to_string(),
+            "init".to_string(),
+        ];
+        let out = resolve_args(&raw);
+        assert_eq!(out, vec!["--cwd", "/tmp/v", "init"]);
+    }
+
+    #[test]
+    fn cwd_only_falls_through_to_watch() {
+        let raw = vec!["--cwd".to_string(), "/tmp/v".to_string()];
+        let out = resolve_args(&raw);
+        assert_eq!(out, vec!["watch", "--cwd", "/tmp/v"]);
     }
 
     #[test]
@@ -368,5 +396,23 @@ mod tests {
             _ => panic!("expected watch"),
         };
         assert!(listen.is_none());
+    }
+
+    #[test]
+    fn cwd_global_default_is_dot() {
+        let cli = Cli::try_parse_from(["agentsync", "status"]).unwrap();
+        assert_eq!(cli.cwd, PathBuf::from("."));
+    }
+
+    #[test]
+    fn cwd_accepted_before_subcommand() {
+        let cli = Cli::try_parse_from(["agentsync", "--cwd", "/tmp/v", "status"]).unwrap();
+        assert_eq!(cli.cwd, PathBuf::from("/tmp/v"));
+    }
+
+    #[test]
+    fn cwd_accepted_after_subcommand() {
+        let cli = Cli::try_parse_from(["agentsync", "status", "--cwd", "/tmp/v"]).unwrap();
+        assert_eq!(cli.cwd, PathBuf::from("/tmp/v"));
     }
 }

@@ -2,10 +2,14 @@ use crate::cli::InitArgs;
 use crate::config::{config_path, identity_path, write, ConfigFile, IdentitySection, SyncSection, VaultSection};
 use agentsync_core::{normalize_rendezvous_url, CreateOptions, Identity, Vault};
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub async fn run(args: InitArgs) -> Result<()> {
-    let path = args.path.canonicalize().unwrap_or(args.path.clone());
+pub async fn run(cwd: PathBuf, args: InitArgs) -> Result<()> {
+    if !cwd.exists() {
+        std::fs::create_dir_all(&cwd)
+            .with_context(|| format!("create vault dir {}", cwd.display()))?;
+    }
+    let path = cwd.canonicalize().unwrap_or(cwd);
     let storage = path.join(".agentsync");
     if config_path(&path).exists() {
         anyhow::bail!(

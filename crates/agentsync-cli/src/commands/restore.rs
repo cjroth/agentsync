@@ -3,10 +3,11 @@ use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{OpenOptions, Vault};
 use anyhow::{bail, Result};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub async fn run_restore_at(args: RestoreAtArgs) -> Result<()> {
-    let path = args.path.canonicalize().unwrap_or(args.path.clone());
+pub async fn run_restore_at(cwd: PathBuf, args: RestoreAtArgs) -> Result<()> {
+    let path = cwd.canonicalize().unwrap_or(cwd);
     let cfg = require_config(&path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
     let identity = config::resolve_identity(&path, &cfg)?;

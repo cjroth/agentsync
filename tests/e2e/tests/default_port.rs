@@ -1,12 +1,14 @@
-//! Default rendezvous port (1234) is applied when `--rendezvous` is given
-//! without an explicit port. The constant lives in agentsync-core; the CLI
-//! normalizes the URL before persisting it to config.toml so the user can
-//! see the canonical form on disk.
+//! Port-less rendezvous URLs are persisted as-is — the WebSocket client
+//! uses the scheme default (443 for wss, 80 for ws) when no port is given.
+//! This keeps `wss://my-hub.fly.dev` working through a reverse proxy that
+//! terminates TLS on 443. Self-hosted hubs running on `[`DEFAULT_PORT`]`
+//! (1234, the unprivileged `--listen` default) must include `:1234` in
+//! their URL.
 
 use std::time::Duration;
 
 #[tokio::test]
-async fn init_with_portless_rendezvous_writes_default_port() {
+async fn init_with_portless_rendezvous_persists_url_as_is() {
     let dir = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
 
@@ -23,18 +25,24 @@ async fn init_with_portless_rendezvous_writes_default_port() {
     let cfg = std::fs::read_to_string(dir.path().join(".agentsync").join("config.toml"))
         .unwrap();
     assert!(
-        cfg.contains("rendezvous_url = \"wss://example.invalid:1234\""),
-        "config.toml did not normalize portless URL to :1234:\n{}",
+        cfg.contains("rendezvous_url = \"wss://example.invalid\""),
+        "config.toml mutated portless URL:\n{}",
+        cfg
+    );
+    assert!(
+        !cfg.contains(":1234"),
+        "config.toml unexpectedly added :1234 to portless URL:\n{}",
         cfg
     );
 }
 
 #[tokio::test]
-async fn clone_against_portless_url_attempts_port_1234() {
-    // When --rendezvous omits a port we should attempt port 1234, not 443.
-    // Spin up a TCP listener on 127.0.0.1:0 just so we can assert nothing
-    // unexpected happens, then run clone against a guaranteed-unused
-    // 127.0.0.1 URL with no port. The error message must reference :1234.
+async fn clone_against_portless_url_does_not_use_1234() {
+    // When --rendezvous omits a port we should attempt the scheme default
+    // (443 for wss) — not 1234. This guards the Fly.io / reverse-proxy
+    // deployment path. We can't easily observe the connect port from the
+    // OS error string, so the regression assertion is negative: nothing in
+    // the output should mention :1234.
     let dir = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
 
@@ -59,8 +67,8 @@ async fn clone_against_portless_url_attempts_port_1234() {
     let combined = format!("{}\n{}", stdout, stderr);
 
     assert!(
-        combined.contains(":1234"),
-        "clone did not reference default port 1234 in output:\n{}",
+        !combined.contains(":1234"),
+        "clone unexpectedly referenced port 1234 for a portless URL:\n{}",
         combined
     );
 }

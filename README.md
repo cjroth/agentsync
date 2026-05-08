@@ -18,11 +18,13 @@ agentsync key generate
 # Paste it into authorized_keys on Machine 1 (or any device that already has the vault)
 # and let it sync.
 
-agentsync clone wss://machine-1
+agentsync clone wss://machine-1:1234
 # Clones into a folder named after the remote vault's `name` (set on the
 # hub via `agentsync init --name <name>`). Pass an explicit dir if you
-# want to override: `agentsync clone wss://machine-1 my-folder`.
-# Default port is 1234, so :1234 is optional in the URL.
+# want to override: `agentsync clone wss://machine-1:1234 my-folder`.
+# Port-less URLs use the scheme default (443 for wss, 80 for ws), which
+# matches reverse-proxy deployments (Fly.io, Railway). For a self-hosted
+# `--listen` hub running on the unprivileged default port, include `:1234`.
 # On first connect you'll be prompted to confirm Machine 1's identity (TOFU).
 # Pass --accept-hub-key <pubkey> to skip the prompt in scripts.
 ```
@@ -123,8 +125,8 @@ Requires Rust 1.89+.
 | Command | Description |
 | --- | --- |
 | `agentsync init [--name NAME]` | Initialize a vault. Auto-generates a `name` from the directory basename (override with `--name`). Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` (skip with `--no-ignore-files`). |
-| `agentsync watch [path] [--authorized-keys KEYS]` | Watch and sync a directory (default when no subcommand given). `--authorized-keys` (or the `AGENTSYNC_AUTHORIZED_KEYS` env var) merges extra `ssh-ed25519` lines into the synced `authorized_keys` on startup — handy for bootstrapping a server from a Fly.io / Railway secret. |
-| `agentsync clone <url> [dir] [--vault-id ID] [--accept-hub-key PK]` | Clone an existing vault. The local directory defaults to the remote vault's `name` (read from the handshake); pass `dir` to override. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. URL port defaults to 1234 if omitted. |
+| `agentsync watch [--authorized-keys KEYS]` | Watch and sync the vault at `--cwd` (default when no subcommand given). `--authorized-keys` (or the `AGENTSYNC_AUTHORIZED_KEYS` env var) merges extra `ssh-ed25519` lines into the synced `authorized_keys` on startup — handy for bootstrapping a server from a Fly.io / Railway secret. |
+| `agentsync clone <url> [dir] [--vault-id ID] [--accept-hub-key PK]` | Clone an existing vault. The local directory defaults to the remote vault's `name` (read from the handshake); pass `dir` to override. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. Port-less URLs use the scheme default (443 for wss, 80 for ws); include `:1234` to reach a self-hosted `--listen` hub. |
 | `agentsync status` | Print connection state, vault id, and local pubkey. |
 | `agentsync push` / `pull` | One-shot sync. |
 | `agentsync restore-at <when>` | Restore to a point in time. Accepts epoch ms or relative offsets like `5m`, `2h`, `1d`, `1w`. |
@@ -133,7 +135,33 @@ Requires Rust 1.89+.
 | `agentsync compact` | Run a compaction pass. |
 | `agentsync key generate/show` | Generate this device's identity, or print its pubkey for pasting into someone else's `authorized_keys`. |
 | `agentsync hub trust <pubkey>` / `forget` / `show` | Manage the pinned hub identity (`[vault] hub_pubkey`). |
-| `agentsync completions <shell>` | Emit a shell-completion script. Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`. |
+| `agentsync completions <shell> [--install]` | Emit a shell-completion script (or `--install` to drop it in the conventional location for `bash`/`zsh`/`fish`). Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`. |
+
+All subcommands operate on the vault at `--cwd` (or the `AGENTSYNC_CWD`
+env var, falling back to the current working directory). Examples:
+
+```sh
+agentsync --cwd ~/notes status
+AGENTSYNC_CWD=~/notes agentsync push
+agentsync ~/notes        # bare-path shortcut → equivalent to `--cwd ~/notes watch`
+```
+
+The exceptions are `clone` (takes its own destination dir) and `init`
+(creates the vault at `--cwd`).
+
+### Tab completion
+
+```sh
+agentsync completions bash --install   # ~/.local/share/bash-completion/completions/agentsync
+agentsync completions zsh  --install   # ~/.zfunc/_agentsync (add ~/.zfunc to $fpath)
+agentsync completions fish --install   # ~/.config/fish/completions/agentsync.fish
+```
+
+For `powershell` / `elvish`, pipe stdout into your shell profile:
+
+```powershell
+agentsync completions powershell | Out-String | Invoke-Expression
+```
 
 `agentsync --help` for full flags.
 

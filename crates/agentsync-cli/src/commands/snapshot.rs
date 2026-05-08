@@ -3,16 +3,18 @@ use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{OpenOptions, Vault};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
-pub async fn run(args: SnapshotArgs) -> Result<()> {
+pub async fn run(cwd: PathBuf, args: SnapshotArgs) -> Result<()> {
+    let path = cwd.canonicalize().unwrap_or(cwd);
     match args.op {
-        SnapshotOp::Create { label, path } => {
+        SnapshotOp::Create { label } => {
             let vault = open(&path).await?;
             vault.create_label(&label).await?;
             vault.flush().await?;
             println!("snapshot created: {}", label);
         }
-        SnapshotOp::List { path } => {
+        SnapshotOp::List => {
             let vault = open(&path).await?;
             let labels = vault.list_labels().await?;
             if labels.is_empty() {
@@ -23,18 +25,17 @@ pub async fn run(args: SnapshotArgs) -> Result<()> {
                 }
             }
         }
-        SnapshotOp::Restore { label, path } => {
-            let canon = path.canonicalize().unwrap_or(path.clone());
-            let cfg = require_config(&canon)?;
-            let mut vault = open(&canon).await?;
+        SnapshotOp::Restore { label } => {
+            let cfg = require_config(&path)?;
+            let mut vault = open(&path).await?;
             let _binding = vault
-                .bind_directory(&canon, cfg.sync.to_bind_options())
+                .bind_directory(&path, cfg.sync.to_bind_options())
                 .await?;
             vault.restore_label(&label).await?;
             vault.flush().await?;
             println!("restored to snapshot: {}", label);
         }
-        SnapshotOp::Delete { label, path } => {
+        SnapshotOp::Delete { label } => {
             let vault = open(&path).await?;
             vault.delete_label(&label).await?;
             vault.flush().await?;
@@ -44,11 +45,10 @@ pub async fn run(args: SnapshotArgs) -> Result<()> {
     Ok(())
 }
 
-async fn open(path: &std::path::Path) -> Result<Vault> {
-    let path = path.canonicalize().unwrap_or(path.to_path_buf());
-    let cfg = require_config(&path)?;
+async fn open(path: &Path) -> Result<Vault> {
+    let cfg = require_config(path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
-    let identity = config::resolve_identity(&path, &cfg)?;
+    let identity = config::resolve_identity(path, &cfg)?;
     Ok(Vault::open(OpenOptions {
         rendezvous_url: cfg.vault.rendezvous_url.clone(),
         vault_id,

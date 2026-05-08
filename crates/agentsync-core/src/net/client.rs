@@ -37,7 +37,15 @@ async fn tls_connect(url: &str) -> Result<(TlsStream<TcpStream>, [u8; 32], Strin
         .host_str()
         .ok_or_else(|| Error::Network("url missing host".into()))?
         .to_string();
-    let port = parsed.port().unwrap_or(crate::constants::DEFAULT_PORT);
+    // Use the scheme default (443 for wss, 80 for ws) when no port is
+    // specified — matches what HTTP libraries do and lets users connect
+    // through reverse proxies (e.g. Fly.io / Railway) with bare URLs.
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        Error::Network(format!(
+            "url has unknown scheme {:?}; specify a port explicitly",
+            parsed.scheme()
+        ))
+    })?;
     let tcp = TcpStream::connect((host.as_str(), port)).await?;
 
     let connector = TlsConnector::from(client_config_accept_any());

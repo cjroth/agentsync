@@ -2,11 +2,12 @@ use crate::cli::{KeyArgs, KeyOp};
 use crate::config::{identity_path, read_or_default, write, ConfigFile, IdentitySection};
 use agentsync_core::Identity;
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 
-pub async fn run(args: KeyArgs) -> Result<()> {
+pub async fn run(cwd: PathBuf, args: KeyArgs) -> Result<()> {
+    let path = cwd.canonicalize().unwrap_or(cwd);
     match args.op {
-        KeyOp::Generate { path, identity } => {
-            let path = path.canonicalize().unwrap_or(path);
+        KeyOp::Generate { identity } => {
             let mut cfg = read_or_default(&path)?;
             if let Some(p) = identity {
                 cfg.identity.path = Some(p.to_string_lossy().into_owned());
@@ -33,8 +34,7 @@ pub async fn run(args: KeyArgs) -> Result<()> {
             println!("{}", id.pubkey().to_ssh_string());
             eprintln!("identity written to {}", id_path.display());
         }
-        KeyOp::Show { path } => {
-            let path = path.canonicalize().unwrap_or(path);
+        KeyOp::Show => {
             let cfg = read_or_default(&path).unwrap_or_else(|_| ConfigFile::default());
             // Agent-backed identity: print the configured agent_pubkey.
             if let Some(s) = cfg.identity.agent_pubkey.as_deref() {

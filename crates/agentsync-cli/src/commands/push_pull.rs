@@ -1,12 +1,12 @@
-use crate::cli::PushPullArgs;
 use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{OpenOptions, Vault};
 use anyhow::Result;
+use std::path::PathBuf;
 use std::time::Duration;
 
-pub async fn run_push(args: PushPullArgs) -> Result<()> {
-    let path = args.path.canonicalize().unwrap_or(args.path.clone());
+pub async fn run_push(cwd: PathBuf) -> Result<()> {
+    let path = cwd.canonicalize().unwrap_or(cwd);
     let cfg = require_config(&path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
     let identity = config::resolve_identity(&path, &cfg)?;
@@ -34,10 +34,10 @@ pub async fn run_push(args: PushPullArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_pull(args: PushPullArgs) -> Result<()> {
+pub async fn run_pull(cwd: PathBuf) -> Result<()> {
     // For Automerge sync, push and pull are symmetric — connecting briefly
     // exchanges all changes in both directions.
-    run_push(args).await?;
+    run_push(cwd).await?;
     println!("pull complete");
     Ok(())
 }
