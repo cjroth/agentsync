@@ -26,4 +26,4 @@ ENV HOME=/data \
 WORKDIR /data/vault
 EXPOSE 1234
 
-CMD ["sh", "-c", "mkdir -p /data/vault && cd /data/vault && { [ -f .agentsync/config.toml ] || agentsync init; } && exec agentsync watch --listen 0.0.0.0:1234"]
+CMD ["sh", "-c", "mkdir -p /data/vault && cd /data/vault && { [ -f .agentsync/config.toml ] || agentsync init; } && exec agentsync watch --listen 0.0.0.0:${PORT:-1234}"]
