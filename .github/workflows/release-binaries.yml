@@ -2,6 +2,8 @@ name: Release CLI binaries
 
 # Tag-only: builds the `agentsync` CLI for all supported platforms and
 # attaches the artifacts to the GitHub Release for the tag.
+#
+# Third-party actions are SHA-pinned. See ci.yml for the bump procedure.
 
 on:
   push:
@@ -41,15 +43,15 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-05-08
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: ${{ matrix.target }}
 
@@ -66,7 +68,7 @@ jobs:
           EOF
 
       - name: Build agentsync
-        run: cargo build --release --bin agentsync --target ${{ matrix.target }}
+        run: cargo build --release --bin agentsync --target ${{ matrix.target }} --locked
 
       - name: Resolve version
         id: ver
@@ -102,7 +104,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLower()
           Set-Content -Path "dist/$name.zip.sha256" -Value "$hash *$name.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: agentsync-${{ matrix.target }}
           path: |
@@ -118,7 +120,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: artifacts
 
@@ -130,7 +132,7 @@ jobs:
           ls -la release
 
       - name: Create or update release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: release/*

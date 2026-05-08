@@ -1,5 +1,12 @@
 name: CI
 
+# All third-party actions are pinned to a full commit SHA (40-char hex)
+# so a compromised release tag can't silently slip into our pipelines.
+# The trailing comment names the upstream tag the SHA was resolved from
+# at the time of pinning. To bump, run:
+#   git ls-remote https://github.com/<owner>/<repo> refs/tags/<tag>^{}
+# and replace both the SHA and the comment.
+
 on:
   pull_request:
   push:
@@ -13,20 +20,40 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-05-08
         with:
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (advisory)
         run: cargo clippy --workspace --all-targets || true
-      - name: Test (native)
-        run: cargo test --workspace
+      - name: Test (native, locked deps)
+        # --locked enforces Cargo.lock and refuses any version not pinned
+        # there. Combined with deps:cargo (below) this gives us a partial
+        # equivalent of "minimum-release-age": no automatic resolution to
+        # freshly-published versions on CI runs.
+        run: cargo test --workspace --locked
       - name: Wasm32 build sanity
-        run: cargo check -p agentsync-core -p agentsync-wasm --target wasm32-unknown-unknown
+        run: cargo check -p agentsync-core -p agentsync-wasm --target wasm32-unknown-unknown --locked
+
+  deps-cargo:
+    # Cargo doesn't (yet) implement a minimum-release-age — see
+    # rust-lang/cargo#15973. The closest practical defenses are:
+    #   1. `--locked` builds (we do this above and in publish workflows).
+    #   2. cargo-deny's advisories + yanked + bans checks.
+    # When the cargo feature lands we should switch to it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-05-08
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --all-features check advisories bans sources
 
   sdk:
     runs-on: ubuntu-latest
@@ -35,22 +62,25 @@ jobs:
       run:
         working-directory: sdks/typescript
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-05-08
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
           node-version: '22'
-      - uses: jetli/wasm-pack-action@v0.4.0
+      - uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           version: 'latest'
 
       - name: Install deps
+        # bunfig.toml sets minimumReleaseAge = 604800 (7d). --frozen-lockfile
+        # then enforces that the lockfile we ship was already produced under
+        # that policy.
         run: bun install --frozen-lockfile
 
       - name: Build wasm + ts
@@ -67,7 +97,7 @@ jobs:
 
       - name: Build CLI for e2e
         working-directory: ${{ github.workspace }}
-        run: cargo build --release --bin agentsync
+        run: cargo build --release --bin agentsync --locked
 
       - name: E2E tests
         env:

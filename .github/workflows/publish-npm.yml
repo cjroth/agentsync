@@ -3,6 +3,9 @@ name: Publish @agentsync/sdk to npm
 # Mirrors publish-crates.yml: every main push publishes
 # `<base>-<sha>` under the `next` dist-tag; every v* tag publishes the
 # tagged version under `latest`.
+#
+# Third-party actions are SHA-pinned. bunfig.toml gates dependency
+# installs on minimumReleaseAge = 7d.
 
 on:
   push:
@@ -26,27 +29,27 @@ jobs:
         working-directory: sdks/typescript
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-05-08
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: '. -> target'
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           version: 'latest'
 
@@ -76,7 +79,7 @@ jobs:
 
       - name: Build CLI for e2e
         working-directory: ${{ github.workspace }}
-        run: cargo build --release --bin agentsync
+        run: cargo build --release --bin agentsync --locked
 
       - name: E2E tests against real hub
         env:

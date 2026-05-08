@@ -96,6 +96,15 @@ The e2e suite runs under Node (not Bun) because Bun's WebSocket client
 doesn't currently support the hub's ed25519 self-signed TLS cert. Unit
 tests run under Bun.
 
+## Supply chain
+
+`bunfig.toml` sets `minimumReleaseAge = 604800` so `bun install` refuses
+any npm package whose latest version is less than 7 days old. This
+blocks the typical short-lived poisoning window from a stolen
+maintainer token before it reaches the lockfile. To bypass for a
+specific incident, add the package name to `minimumReleaseAgeExcludes`
+in `bunfig.toml` — don't disable globally.
+
 ## License
 
 MIT or Apache-2.0, at your option.

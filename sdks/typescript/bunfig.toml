@@ -1,0 +1,19 @@
+# Supply-chain hardening for `bun install`.
+#
+# Refuse to install npm packages whose latest registry timestamp is less
+# than 7 days (604800 seconds) old. Mirrors pnpm/npm's
+# `--minimum-release-age`: the typical short-lived poisoning window from
+# a stolen maintainer token (axios March 2026, etc.) is well under a
+# day, so a 7-day cooldown blocks them before they can reach the
+# lockfile.
+#
+# To temporarily bypass for a security fix, add the package to
+# `minimumReleaseAgeExcludes`. Don't disable globally.
+
+[install]
+minimumReleaseAge = 604800
+
+# Packages we explicitly permit to install before the 7-day window has
+# elapsed. Empty by default; populate per incident with a comment that
+# names the CVE / advisory.
+minimumReleaseAgeExcludes = []

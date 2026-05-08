@@ -1,0 +1,65 @@
+# cargo-deny configuration.
+#
+# Cargo itself doesn't (yet) implement minimum-release-age — see
+# https://github.com/rust-lang/cargo/issues/15973. Until that lands,
+# the closest defensive layer is:
+#
+#   1. `Cargo.lock` checked in + `cargo build --locked` everywhere
+#      (CI workflows enforce this) — pulls only the exact versions a
+#      human reviewed at lockfile-bump time.
+#   2. cargo-deny enforced on every CI run:
+#       - advisories: anything in RUSTSEC fails the build
+#       - bans: yanked crates always fail
+#       - sources: only crates.io is allowed; no git-only deps
+#
+# Bumping Cargo.lock IS the gate. Reviewers should check that any new
+# transitive version has been on crates.io for at least 7 days (the
+# crate page on crates.io shows the publish date).
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive set used by the broader Rust ecosystem. `Unicode-3.0` is the
+# unicode-ident family, `MPL-2.0` covers webpki / rustls, `OpenSSL` is
+# pulled in by the wasm-bindgen-cli dev tooling but not by the runtime.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "Zlib",
+  "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Multiple versions of the same crate are common in transitive trees and
+# don't constitute a security finding on their own — warn so reviewers
+# notice a regression but don't fail the build.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace members reference each other by path without a version
+# constraint (e.g. tests/e2e → agentsync-core). That's a normal
+# workspace pattern, not a real wildcard external dep, so allow it.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
