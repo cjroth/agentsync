@@ -175,10 +175,10 @@ The included `Dockerfile` builds a tiny image that runs `agentsync watch
 - `AGENTSYNC_VAULT_NAME` — name written into `config.toml` on first launch.
   Used as the default local directory when peers run
   `agentsync clone wss://your-host`.
-- `AGENTSYNC_AUTHORIZED_KEYS` — newline-separated `ssh-ed25519 <base64> [comment]`
-  entries (same format as the `authorized_keys` file). Merged into the
-  synced `authorized_keys` on every `watch` startup; existing keys are
-  skipped, so it's safe to leave set across restarts.
+- `AGENTSYNC_AUTHORIZED_KEYS` — `ssh-ed25519 <base64> [comment]` entries
+  separated by newlines or commas. Merged into the synced `authorized_keys` on every `watch`
+  startup; existing keys are skipped, so it's safe to leave set across
+  restarts.
 
 Fly.io example (see `fly.toml`):
 

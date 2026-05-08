@@ -135,10 +135,11 @@ pub struct WatchArgs {
     #[arg(long)]
     pub identity_agent_pubkey: Option<String>,
     /// Extra public keys to merge into `authorized_keys` on startup. Accepts
-    /// the same SSH-style format as the file itself (newline-separated
-    /// `ssh-ed25519 <base64> [comment]` entries; comments and blank lines
-    /// allowed). Falls back to the `AGENTSYNC_AUTHORIZED_KEYS` env var.
-    /// Useful for bootstrapping a fresh server (e.g. from a Fly.io secret).
+    /// `ssh-ed25519 <base64> [comment]` entries separated by newlines or
+    /// commas (commas are handy for single-line shell exports). Comments
+    /// and blank lines are allowed. Falls back to the
+    /// `AGENTSYNC_AUTHORIZED_KEYS` env var. Useful for bootstrapping a
+    /// fresh server (e.g. from a Fly.io / Railway secret).
     #[arg(long, env = "AGENTSYNC_AUTHORIZED_KEYS")]
     pub authorized_keys: Option<String>,
 }

@@ -92,11 +92,14 @@ pub async fn run(args: WatchArgs) -> Result<()> {
 
 /// Merge `raw` (whatever the user passed via `--authorized-keys` or the
 /// `AGENTSYNC_AUTHORIZED_KEYS` env var) into the synced `authorized_keys`
-/// file. Idempotent: keys already present are skipped, so this is safe to
-/// run on every server restart. New keys are written through the synced doc
-/// so they propagate to peers within a sync round.
+/// file. Accepts both newline- and comma-separated entries — comma form is
+/// useful in single-line shell exports (`KEY=a,b,c`). Idempotent: keys
+/// already present are skipped, so this is safe to run on every server
+/// restart. New keys are written through the synced doc so they propagate
+/// to peers within a sync round.
 async fn merge_authorized_keys(vault: &Vault, raw: &str) -> Result<()> {
-    let new_peers = parse_authorized_keys(raw);
+    let normalized = raw.replace(',', "\n");
+    let new_peers = parse_authorized_keys(&normalized);
     if new_peers.is_empty() {
         return Ok(());
     }
