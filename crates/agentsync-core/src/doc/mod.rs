@@ -185,12 +185,20 @@ fn genesis_actor(vault_id: &str) -> ActorId {
     ActorId::from(&digest[..])
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// On `wasm32-unknown-unknown` there is no `SystemTime`. Use the JS host's
+/// `Date.now()` as the wall-clock source.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn now_ms() -> i64 {
+    js_sys::Date::now() as i64
 }
 
 impl Doc {

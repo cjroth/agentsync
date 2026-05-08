@@ -18,16 +18,22 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGT
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const PUBKEY_LEN: usize = 32;
 pub const SIGNATURE_LEN: usize = 64;
 const SSH_KEY_TYPE: &str = "ssh-ed25519";
 
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 const SSH_AGENT_FAILURE: u8 = 5;
 
 /// Identity used to authenticate the local peer in handshakes.
@@ -493,11 +499,13 @@ async fn read_message(stream: &mut tokio::net::UnixStream) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 fn write_string(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(&(s.len() as u32).to_be_bytes());
     out.extend_from_slice(s);
 }
 
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 fn read_string<'a>(buf: &'a [u8], cursor: &mut usize) -> Result<&'a [u8]> {
     read_ssh_string(buf, cursor)
 }

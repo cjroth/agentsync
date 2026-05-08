@@ -32,6 +32,7 @@ pub enum Error {
     #[error("network: {0}")]
     Network(String),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("notify: {0}")]
     Notify(#[from] notify::Error),
 
@@ -60,6 +61,7 @@ pub enum Error {
     Other(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<tokio_tungstenite::tungstenite::Error> for Error {
     fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
         Error::WebSocket(e.to_string())

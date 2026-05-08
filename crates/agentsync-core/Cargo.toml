@@ -6,35 +6,50 @@ license.workspace = true
 authors.workspace = true
 description = "Real-time directory sync engine using Automerge CRDTs"
 
+# Wasm-safe dependencies only. Anything that pulls in tokio sockets, OS
+# filesystem watchers, or rustls must go in the target-cfg block below so
+# the wasm32 build of this crate stays buildable.
 [dependencies]
 automerge.workspace = true
-tokio.workspace = true
-tokio-tungstenite.workspace = true
-futures-util.workspace = true
-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rmp-serde.workspace = true
 tracing.workspace = true
 hmac.workspace = true
 sha2.workspace = true
-rand.workspace = true
 hex.workspace = true
 base64.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 unicode-normalization.workspace = true
-async-trait.workspace = true
 url.workspace = true
 bytes.workspace = true
-walkdir.workspace = true
 serde_bytes = "0.11"
 ed25519-dalek.workspace = true
 rand_core.workspace = true
+
+# Native-only: tokio runtime, sockets, TLS, file watcher.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+notify.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+walkdir.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 tokio-rustls.workspace = true
+
+# Wasm: pull in getrandom's browser/node backends so OsRng works, plus
+# js-sys for Date.now() as the time source. Two getrandom majors are
+# present transitively (rand_core 0.6 → getrandom 0.2; automerge → 0.4),
+# so we enable the JS backend on both.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+js-sys = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
