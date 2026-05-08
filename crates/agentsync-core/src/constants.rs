@@ -1,11 +1,15 @@
 //! Centralized defaults shared between the CLI and the core library.
 
-/// Default `--listen` bind port. Unprivileged so any user can run a hub
-/// without `CAP_NET_BIND_SERVICE`.
-pub const DEFAULT_PORT: u16 = 1234;
+/// Default `--listen` bind port. Matches the standard `wss://` scheme port
+/// so URLs can elide the port (`wss://my-hub`) and most corporate
+/// firewalls / hotel wifi / mobile carriers — which permit 443 outbound —
+/// let the connection through. Privileged on Unix: hubs running as a
+/// regular user need `setcap cap_net_bind_service=+ep` on the binary
+/// (Linux) or socket activation / a launchd dropper (macOS) to bind it.
+pub const DEFAULT_PORT: u16 = 443;
 
 /// Default `--listen` bind address (`0.0.0.0:<DEFAULT_PORT>`).
-pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1234";
+pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:443";
 
 /// Filename of the authorized-keys list inside a vault. SSH-style format:
 /// one `ssh-ed25519 <base64> [comment]` per line, `#` comments allowed.
@@ -21,9 +25,8 @@ pub const USER_IDENTITY_FILENAME: &str = "id_ed25519";
 
 /// Currently a passthrough — the WebSocket client uses the scheme-default
 /// port (443 for `wss`, 80 for `ws`) when none is specified, which matches
-/// typical reverse-proxy deployments (Fly.io, Railway, etc.). Self-hosted
-/// hubs running on the unprivileged `--listen` default ([`DEFAULT_PORT`])
-/// must include the port explicitly in their rendezvous URL.
+/// typical reverse-proxy deployments (Fly.io, Railway, etc.) and the local
+/// `--listen` default.
 pub fn normalize_rendezvous_url(url: &str) -> String {
     url.to_string()
 }

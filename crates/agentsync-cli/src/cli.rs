@@ -119,7 +119,10 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 pub struct WatchArgs {
     /// Bind a websocket listener on ADDR (acts as rendezvous). If the flag is
-    /// passed without a value, defaults to `0.0.0.0:1234`.
+    /// passed without a value, defaults to `0.0.0.0:443` — privileged on
+    /// Unix; see the README for `setcap` / launchd-socket-activation
+    /// instructions, or pass an unprivileged port explicitly
+    /// (`--listen 0.0.0.0:8443`).
     #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_LISTEN_ADDR)]
     pub listen: Option<String>,
     /// Override the rendezvous URL configured in config.toml.

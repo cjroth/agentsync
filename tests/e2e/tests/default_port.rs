@@ -1,9 +1,7 @@
 //! Port-less rendezvous URLs are persisted as-is — the WebSocket client
-//! uses the scheme default (443 for wss, 80 for ws) when no port is given.
-//! This keeps `wss://my-hub.fly.dev` working through a reverse proxy that
-//! terminates TLS on 443. Self-hosted hubs running on `[`DEFAULT_PORT`]`
-//! (1234, the unprivileged `--listen` default) must include `:1234` in
-//! their URL.
+//! uses the scheme default (443 for wss, 80 for ws) when no port is given,
+//! which matches the local `--listen` default and reverse-proxy
+//! deployments (Fly.io, Railway). The CLI doesn't auto-inject any port.
 
 use std::time::Duration;
 
@@ -37,12 +35,10 @@ async fn init_with_portless_rendezvous_persists_url_as_is() {
 }
 
 #[tokio::test]
-async fn clone_against_portless_url_does_not_use_1234() {
-    // When --rendezvous omits a port we should attempt the scheme default
-    // (443 for wss) — not 1234. This guards the Fly.io / reverse-proxy
-    // deployment path. We can't easily observe the connect port from the
-    // OS error string, so the regression assertion is negative: nothing in
-    // the output should mention :1234.
+async fn clone_against_portless_url_does_not_inject_a_port() {
+    // Regression check: the CLI must not auto-inject any explicit port
+    // (historically `:1234`) into a portless URL. The connection should
+    // resolve the port from the wss scheme default (443) instead.
     let dir = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
 
