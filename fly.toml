@@ -12,6 +12,7 @@ primary_region = "ewr"
 #   fly secrets set AGENTSYNC_AUTHORIZED_KEYS="$(cat ~/.agentsync/id_ed25519.pub)"
 [env]
   AGENTSYNC_VAULT_NAME = "vault"
+  AGENTSYNC_CWD = "/mnt/workspace"
   # Fly's [http_service] terminates TLS at the edge and forwards plain
   # HTTP/WS to internal_port — so the in-container hub binds plain WS and
   # lets the edge handle TLS. Clients still connect via wss://.
@@ -26,7 +27,7 @@ primary_region = "ewr"
 
 [[mounts]]
   source = "agentsync_data"
-  destination = "/data"
+  destination = "/mnt/workspace"
 
 [[vm]]
   cpu_kind = "shared"
