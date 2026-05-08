@@ -69,6 +69,45 @@ async fn clone_against_portless_url_does_not_inject_a_port() {
     );
 }
 
+#[tokio::test]
+async fn clone_url_without_scheme_assumes_wss() {
+    // Scheme-less hosts must be normalised to wss://, so the CLI doesn't
+    // bail with "unsupported scheme" before even attempting a connection.
+    let dir = tempfile::TempDir::new().unwrap();
+    let binary = locate_binary();
+
+    let out = tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio::process::Command::new(&binary)
+            .arg("clone")
+            .arg("127.0.0.1:1") // bare host:port — no scheme
+            .arg(dir.path().join("vault"))
+            .arg("--accept-hub-key")
+            .arg("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .output(),
+    )
+    .await
+    .expect("clone command did not exit in time")
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    assert!(
+        !combined.contains("unsupported scheme"),
+        "scheme-less URL should be normalised to wss://, got:\n{}",
+        combined
+    );
+    // The connect itself should fail (port 1 isn't a hub) but the URL
+    // must at least be parsed as wss:// internally.
+    assert!(
+        combined.contains("wss://127.0.0.1:1") || combined.contains("connect"),
+        "expected wss-rewritten URL or connect failure in output:\n{}",
+        combined
+    );
+}
+
 fn locate_binary() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("AGENTSYNC_BIN") {
         return std::path::PathBuf::from(p);

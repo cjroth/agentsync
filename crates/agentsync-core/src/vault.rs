@@ -6,7 +6,7 @@ use crate::fs::node_adapter::NodeFsAdapter;
 use crate::identity::{Identity, Pubkey};
 use crate::net::client::ClientConn;
 use crate::net::protocol::Frame;
-use crate::net::server::Server;
+use crate::net::server::{Server, ServerTls};
 use crate::constants::AUTHORIZED_KEYS_FILE;
 use crate::peers_md::{parse_authorized_keys, render_authorized_keys, AuthorizedPeer};
 use crate::store::{BlobStore, DocStore, SnapshotIndex};
@@ -664,6 +664,22 @@ impl Vault {
     pub async fn listen(&mut self, addr: SocketAddr) -> Result<SocketAddr> {
         let tls_dir = crate::tls::tls_dir_for_storage(&self.inner.storage_path);
         let (cert_der, key_der) = crate::tls::load_or_generate_self_signed(&tls_dir)?;
+        self.listen_with_tls(addr, ServerTls::Enabled { cert_der, key_der })
+            .await
+    }
+
+    /// Bind a listener with plain TCP (no in-process TLS). Use when an
+    /// upstream reverse proxy (Fly.io, Railway, …) terminates TLS at the
+    /// edge and forwards plain WS to the hub.
+    pub async fn listen_plain(&mut self, addr: SocketAddr) -> Result<SocketAddr> {
+        self.listen_with_tls(addr, ServerTls::Disabled).await
+    }
+
+    async fn listen_with_tls(
+        &mut self,
+        addr: SocketAddr,
+        tls: ServerTls,
+    ) -> Result<SocketAddr> {
         let server = Server::bind(
             addr,
             self.inner.vault_id.clone(),
@@ -672,8 +688,7 @@ impl Vault {
             Arc::new(VaultSyncHandle {
                 inner: self.inner.clone(),
             }) as Arc<dyn SyncHandle>,
-            cert_der,
-            key_der,
+            tls,
         )
         .await?;
         let bound = server.bound_addr;

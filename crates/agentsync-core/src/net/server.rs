@@ -3,6 +3,7 @@ use crate::error::{Error, Result};
 use crate::identity::{Identity, Pubkey};
 use crate::net::client::handle_inbound;
 use crate::net::protocol::Frame;
+use crate::net::transport::MaybeTlsServerStream;
 use crate::peers_md::AuthorizedPeer;
 use crate::tls::{cert_fingerprint, server_config};
 use crate::vault::SyncHandle;
@@ -14,14 +15,26 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
 
-type AcceptedStream = TlsStream<tokio::net::TcpStream>;
+type AcceptedStream = MaybeTlsServerStream;
+
+/// TLS configuration for [`Server::bind`]. `Enabled` runs TLS termination
+/// in-process with a self-signed cert; `Disabled` accepts plain WS, which
+/// expects an upstream reverse proxy (Fly.io, Railway) to terminate TLS.
+///
+/// In `Disabled` mode the cert fingerprint is empty (32 bytes of zero), so
+/// the channel-binding check on the client side is effectively a no-op:
+/// MITM detection at the TLS layer is delegated to the proxy. Use only
+/// when you trust the network path between the proxy and the hub.
+pub enum ServerTls {
+    Enabled { cert_der: Vec<u8>, key_der: Vec<u8> },
+    Disabled,
+}
 
 /// `agentsync --listen` server. Accepts websocket connections from peers and
 /// bridges each one to its own SyncState within the local vault.
@@ -34,25 +47,39 @@ pub struct Server {
 }
 
 impl Server {
-    /// Bind the listener with a self-signed TLS cert. The cert is loaded
-    /// from `<storage_path>/../.agentsync-server/` if present, otherwise a
-    /// fresh one is generated and persisted there.
+    /// Bind the listener. With [`ServerTls::Enabled`], terminates TLS
+    /// in-process (cert auto-loaded by the caller from
+    /// `<storage_path>/../.agentsync-server/`). With [`ServerTls::Disabled`],
+    /// accepts plain WebSocket connections — used when an upstream reverse
+    /// proxy (Fly.io, Railway, …) terminates TLS at the edge.
     pub async fn bind(
         addr: SocketAddr,
         vault_id: String,
         vault_name: Option<String>,
         identity: Identity,
         sync_handle: Arc<dyn SyncHandle>,
-        cert_der: Vec<u8>,
-        key_der: Vec<u8>,
+        tls: ServerTls,
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let bound = listener.local_addr()?;
-        info!(addr = %bound, vault_id, "rendezvous listening");
+        let scheme = match &tls {
+            ServerTls::Enabled { .. } => "wss",
+            ServerTls::Disabled => "ws",
+        };
+        info!(addr = %bound, scheme, vault_id, "rendezvous listening");
 
-        let server_tls = server_config(cert_der.clone(), key_der)?;
-        let acceptor = TlsAcceptor::from(server_tls);
-        let cert_fp = cert_fingerprint(&cert_der);
+        let (acceptor, cert_fp): (Option<TlsAcceptor>, [u8; 32]) = match tls {
+            ServerTls::Enabled { cert_der, key_der } => {
+                let server_tls = server_config(cert_der.clone(), key_der)?;
+                let fp = cert_fingerprint(&cert_der);
+                (Some(TlsAcceptor::from(server_tls)), fp)
+            }
+            // No TLS in-process — channel binding degrades to a constant
+            // zero fingerprint. Both peers see the same value, so the
+            // signature still binds the handshake to "tls disabled" and
+            // can't be replayed against a wss listener.
+            ServerTls::Disabled => (None, [0u8; 32]),
+        };
 
         let (shutdown_tx, _) = broadcast::channel::<()>(8);
         let peer_tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -85,15 +112,18 @@ impl Server {
                         let acceptor = acceptor_for_accept.clone();
                         let peer_shutdown = accept_shutdown_tx.subscribe();
                         let task = tokio::spawn(async move {
-                            let tls_stream = match acceptor.accept(stream).await {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    warn!(peer=%peer_addr, error=%e, "tls accept");
-                                    return;
-                                }
+                            let accepted: MaybeTlsServerStream = match &acceptor {
+                                Some(acc) => match acc.accept(stream).await {
+                                    Ok(s) => MaybeTlsServerStream::Tls(s),
+                                    Err(e) => {
+                                        warn!(peer=%peer_addr, error=%e, "tls accept");
+                                        return;
+                                    }
+                                },
+                                None => MaybeTlsServerStream::Plain(stream),
                             };
                             if let Err(e) = handle_peer(
-                                tls_stream,
+                                accepted,
                                 peer_addr,
                                 vault_id,
                                 vault_name,

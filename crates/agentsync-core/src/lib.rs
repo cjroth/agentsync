@@ -18,8 +18,8 @@ pub mod vault;
 
 pub use auth::{build_transcript, random_nonce, HANDSHAKE_DOMAIN, NONCE_LEN};
 pub use constants::{
-    normalize_rendezvous_url, AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR, DEFAULT_PORT,
-    USER_IDENTITY_FILENAME, USER_STATE_DIR,
+    normalize_rendezvous_url, normalize_with_scheme, AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR,
+    DEFAULT_LISTEN_ADDR_NO_TLS, DEFAULT_PORT, USER_IDENTITY_FILENAME, USER_STATE_DIR,
 };
 pub use doc::{
     content_hash, DirectoryMeta, Doc, FileId, FileKind, FileMeta, Label, SCHEMA_VERSION,

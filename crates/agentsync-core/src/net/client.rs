@@ -2,6 +2,7 @@ use crate::auth::{build_transcript, random_nonce, NONCE_LEN};
 use crate::error::{Error, Result};
 use crate::identity::{Identity, Pubkey};
 use crate::net::protocol::{Frame, HelloOp};
+use crate::net::transport::MaybeTlsClientStream;
 use crate::tls::{cert_fingerprint, client_config_accept_any};
 use crate::vault::SyncHandle;
 use futures_util::stream::{SplitSink, SplitStream};
@@ -13,7 +14,6 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::client_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -21,16 +21,20 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
 
-type WsStream = WebSocketStream<TlsStream<TcpStream>>;
+type WsStream = WebSocketStream<MaybeTlsClientStream>;
 
-/// Establish a TCP+TLS connection to `url` and return the wrapped TlsStream
-/// plus the SHA-256 of the cert the server presented.
-async fn tls_connect(url: &str) -> Result<(TlsStream<TcpStream>, [u8; 32], String)> {
+/// Connect a TCP socket and, if the URL scheme is `wss://`, wrap it in a
+/// TLS session. Returns the (possibly-TLS) stream plus the SHA-256 of the
+/// server cert (or 32 bytes of zero for plain `ws://`, which means "no
+/// channel binding available — trust falls back to the hub identity
+/// signature alone").
+async fn open_transport(url: &str) -> Result<(MaybeTlsClientStream, [u8; 32])> {
     let parsed = url::Url::parse(url).map_err(|e| Error::Network(format!("parse url: {}", e)))?;
-    if parsed.scheme() != "wss" && parsed.scheme() != "ws" {
+    let scheme = parsed.scheme();
+    if scheme != "wss" && scheme != "ws" {
         return Err(Error::Network(format!(
-            "unsupported scheme {:?} (expected wss://)",
-            parsed.scheme()
+            "unsupported scheme {:?} (expected ws:// or wss://)",
+            scheme
         )));
     }
     let host = parsed
@@ -43,10 +47,17 @@ async fn tls_connect(url: &str) -> Result<(TlsStream<TcpStream>, [u8; 32], Strin
     let port = parsed.port_or_known_default().ok_or_else(|| {
         Error::Network(format!(
             "url has unknown scheme {:?}; specify a port explicitly",
-            parsed.scheme()
+            scheme
         ))
     })?;
     let tcp = TcpStream::connect((host.as_str(), port)).await?;
+
+    if scheme == "ws" {
+        // Plain transport. Channel binding is degraded; the hub identity
+        // signature still authenticates the peer.
+        info!(url, "plain ws connection (no TLS)");
+        return Ok((MaybeTlsClientStream::Plain(tcp), [0u8; 32]));
+    }
 
     let connector = TlsConnector::from(client_config_accept_any());
     // Trust comes from the application-layer signature, not from the TLS
@@ -71,15 +82,15 @@ async fn tls_connect(url: &str) -> Result<(TlsStream<TcpStream>, [u8; 32], Strin
         .to_vec();
     let fp = cert_fingerprint(&cert_der);
     info!(url, fp = ?hex::encode(fp), "tls handshake complete");
-    Ok((tls, fp, url.to_string()))
+    Ok((MaybeTlsClientStream::Tls(tls), fp))
 }
 
 async fn open_websocket(url: &str) -> Result<(WsStream, [u8; 32])> {
-    let (tls, fp, _url) = tls_connect(url).await?;
+    let (transport, fp) = open_transport(url).await?;
     let request = url
         .into_client_request()
         .map_err(|e| Error::Network(format!("build ws request: {}", e)))?;
-    let (ws, _) = client_async(request, tls)
+    let (ws, _) = client_async(request, transport)
         .await
         .map_err(|e| Error::WebSocket(e.to_string()))?;
     Ok((ws, fp))
@@ -141,11 +152,20 @@ where
     let mut hub_nonce = [0u8; NONCE_LEN];
     hub_nonce.copy_from_slice(&hub_nonce_bytes);
 
-    // Channel binding: the fingerprint advertised by the hub MUST match the
-    // one we observed at the TLS layer. A relayed MITM that re-encrypts to
-    // the real listener will trip this — its TLS cert is different from
-    // what the hub committed to in HelloHub.
-    if advertised_fp != expected_cert_fp.as_slice() {
+    // Channel binding: the fingerprint advertised by the hub MUST match
+    // the one we observed at the TLS layer. A relayed MITM that
+    // re-encrypts to the real listener will trip this — its TLS cert is
+    // different from what the hub committed to in HelloHub.
+    //
+    // Exception: when the hub advertises an all-zero fingerprint, it has
+    // explicitly opted out of channel binding (`watch --no-tls`, where
+    // TLS is terminated by an upstream reverse proxy). Trust there falls
+    // back to the hub identity signature alone, which a MITM cannot
+    // forge — the signature covers `hub_identity_pubkey`, and the hub
+    // identity is TOFU-pinned per vault.
+    let hub_disabled_binding = advertised_fp.len() == 32
+        && advertised_fp.iter().all(|b| *b == 0);
+    if !hub_disabled_binding && advertised_fp != expected_cert_fp.as_slice() {
         return Err(Error::Auth(format!(
             "tls cert fingerprint mismatch: advertised {} bytes, observed {}",
             advertised_fp.len(),

@@ -3,12 +3,12 @@ use crate::config::{
     identity_path, write, ConfigFile, IdentitySection, SyncSection, VaultSection,
 };
 use agentsync_core::net::client::ClientConn;
-use agentsync_core::{normalize_rendezvous_url, Identity, OpenOptions, Pubkey, Vault};
+use agentsync_core::{normalize_with_scheme, Identity, OpenOptions, Pubkey, Vault};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub async fn run(args: CloneArgs) -> Result<()> {
-    let rendezvous = normalize_rendezvous_url(&args.remote_url);
+    let rendezvous = normalize_with_scheme(&args.remote_url, args.no_tls);
 
     // Pre-validate the --accept-hub-key value if any, so we fail before
     // spinning up a connection on a typo.

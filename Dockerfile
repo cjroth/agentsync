@@ -34,4 +34,12 @@ EXPOSE 443
 #   - merge any pubkeys from $AGENTSYNC_AUTHORIZED_KEYS into the synced
 #     authorized_keys (env var read directly by `watch`). Restart-safe:
 #     keys already present are skipped.
+#
+# Environment knobs:
+#   PORT                  bind port (default 443)
+#   AGENTSYNC_NO_TLS=1    bind plain WS instead of WSS — use behind a
+#                         reverse proxy that already terminates TLS
+#                         (Railway, Render, Cloudflare Tunnel, …).
+#                         Read by `agentsync watch` directly; no CMD
+#                         override needed.
 CMD ["sh", "-c", "mkdir -p /data/vault && cd /data/vault && { [ -f .agentsync/config.toml ] || agentsync init --name \"$AGENTSYNC_VAULT_NAME\"; } && exec agentsync watch --listen 0.0.0.0:${PORT:-443}"]

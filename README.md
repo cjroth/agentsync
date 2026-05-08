@@ -20,10 +20,12 @@ agentsync key generate
 # Paste it into authorized_keys on Machine 1 (or any device that already has the vault)
 # and let it sync.
 
-agentsync clone wss://machine-1
+agentsync clone machine-1
 # Clones into a folder named after the remote vault's `name` (set on the
 # hub via `agentsync init --name <name>`). Pass an explicit dir if you
-# want to override: `agentsync clone wss://machine-1 my-folder`.
+# want to override: `agentsync clone machine-1 my-folder`. Bare hosts get
+# `wss://` prepended (or `ws://` with `--no-tls`); pass `wss://host:port`
+# / `ws://host:port` to be explicit.
 # Port-less URLs use the scheme default (443 for wss, 80 for ws); include
 # `:<port>` only if your hub binds something other than 443.
 # On first connect you'll be prompted to confirm Machine 1's identity (TOFU).
@@ -127,7 +129,7 @@ Requires Rust 1.89+.
 | --- | --- |
 | `agentsync init [--name NAME]` | Initialize a vault. Auto-generates a `name` from the directory basename (override with `--name`). Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` (skip with `--no-ignore-files`). |
 | `agentsync watch [--authorized-keys KEYS]` | Watch and sync the vault at `--cwd` (default when no subcommand given). `--authorized-keys` (or the `AGENTSYNC_AUTHORIZED_KEYS` env var) merges extra `ssh-ed25519` lines into the synced `authorized_keys` on startup — handy for bootstrapping a server from a Fly.io / Railway secret. |
-| `agentsync clone <url> [dir] [--vault-id ID] [--accept-hub-key PK]` | Clone an existing vault. The local directory defaults to the remote vault's `name` (read from the handshake); pass `dir` to override. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. Port-less URLs use the scheme default (443 for wss, 80 for ws); include `:<port>` only when reaching a hub bound to something other than 443. |
+| `agentsync clone <url> [dir] [--vault-id ID] [--accept-hub-key PK] [--no-tls]` | Clone an existing vault. The local directory defaults to the remote vault's `name` (read from the handshake); pass `dir` to override. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. URLs without a scheme are taken as `wss://` (or `ws://` with `--no-tls`). Port-less URLs use the scheme default (443 for wss, 80 for ws); include `:<port>` only when reaching a hub bound to something other than 443. |
 | `agentsync status` | Print connection state, vault id, and local pubkey. |
 | `agentsync push` / `pull` | One-shot sync. |
 | `agentsync restore-at <when>` | Restore to a point in time. Accepts epoch ms or relative offsets like `5m`, `2h`, `1d`, `1w`. |
@@ -149,6 +151,39 @@ agentsync ~/notes        # bare-path shortcut → equivalent to `--cwd ~/notes w
 
 The exceptions are `clone` (takes its own destination dir) and `init`
 (creates the vault at `--cwd`).
+
+### Letting a reverse proxy terminate TLS
+
+If you're running the hub behind a managed proxy that already terminates TLS
+(Railway, Render, Cloudflare Tunnel, an Nginx in front of you, …), pass
+`--no-tls` to skip in-process TLS:
+
+```sh
+agentsync watch --listen --no-tls       # binds 0.0.0.0:80 (plain ws)
+agentsync watch --listen 0.0.0.0:8080 --no-tls
+```
+
+Peers connect via the proxy's TLS endpoint — `agentsync clone wss://my-app.up.railway.app` —
+or directly with `agentsync clone --no-tls my-app:8080` for a plain link on a
+trusted network.
+
+The same toggle is exposed as the `AGENTSYNC_NO_TLS` env var (set it to
+`1` / `true` / `yes`), so on platforms like Railway you can flip it from
+the dashboard without overriding the container start command:
+
+```sh
+# Railway (or any Docker-friendly host with edge TLS):
+#   AGENTSYNC_NO_TLS=1
+#   PORT=<whatever the platform injects>      # e.g. 8080
+# The default Docker CMD picks both up automatically.
+```
+
+In `--no-tls` mode the cert-fingerprint channel binding is degraded: the hub
+advertises an all-zero fingerprint, so MITM detection at the TLS layer is
+delegated to the proxy. The hub identity (TOFU-pinned per vault) is still
+verified end-to-end via the handshake signature, which a MITM cannot forge.
+Use only when you trust the network path between the proxy and the hub
+(public clouds typically run this hop on a private network).
 
 ### Binding 443 as a regular user
 

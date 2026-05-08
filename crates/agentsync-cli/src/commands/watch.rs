@@ -1,9 +1,10 @@
-use crate::cli::WatchArgs;
+use crate::cli::{WatchArgs, LISTEN_DEFAULT_SENTINEL};
 use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{
-    normalize_rendezvous_url, parse_authorized_keys, render_authorized_keys, AuthorizedPeer,
-    OpenOptions, ReconnectOptions, Vault, AUTHORIZED_KEYS_FILE,
+    normalize_with_scheme, parse_authorized_keys, render_authorized_keys, AuthorizedPeer,
+    OpenOptions, ReconnectOptions, Vault, AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR,
+    DEFAULT_LISTEN_ADDR_NO_TLS,
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -11,6 +12,10 @@ use tracing::info;
 
 pub async fn run(cwd: PathBuf, args: WatchArgs) -> Result<()> {
     let path = cwd.canonicalize().unwrap_or(cwd);
+    // `--no-tls` can also come from `AGENTSYNC_NO_TLS` so deployments on
+    // managed platforms (Railway, Render, …) can flip it via the env-var
+    // dashboard without overriding the container start command.
+    let no_tls = args.no_tls || env_truthy("AGENTSYNC_NO_TLS");
     let mut cfg = require_config(&path)?;
     let vault_id = cfg
         .vault
@@ -35,7 +40,7 @@ pub async fn run(cwd: PathBuf, args: WatchArgs) -> Result<()> {
     } else {
         args.rendezvous
             .as_deref()
-            .map(normalize_rendezvous_url)
+            .map(|u| normalize_with_scheme(u, no_tls))
             .or_else(|| cfg.vault.rendezvous_url.clone())
     };
 
@@ -57,12 +62,29 @@ pub async fn run(cwd: PathBuf, args: WatchArgs) -> Result<()> {
     let _binding = vault.bind_directory(&path, bind_opts).await?;
 
     if let Some(addr) = &args.listen {
-        let parsed: std::net::SocketAddr = addr
+        // Resolve `--listen` (no value) to the default for the chosen
+        // TLS mode: 443 for wss, 80 for ws. An explicitly-passed address
+        // wins regardless.
+        let resolved: &str = if addr == LISTEN_DEFAULT_SENTINEL {
+            if no_tls {
+                DEFAULT_LISTEN_ADDR_NO_TLS
+            } else {
+                DEFAULT_LISTEN_ADDR
+            }
+        } else {
+            addr
+        };
+        let parsed: std::net::SocketAddr = resolved
             .parse()
-            .with_context(|| format!("invalid --listen address: {}", addr))?;
-        let bound = vault.listen(parsed).await?;
-        info!(addr = %bound, "listening for peers");
-        println!("listening on wss://{}", bound);
+            .with_context(|| format!("invalid --listen address: {}", resolved))?;
+        let bound = if no_tls {
+            vault.listen_plain(parsed).await?
+        } else {
+            vault.listen(parsed).await?
+        };
+        let scheme = if no_tls { "ws" } else { "wss" };
+        info!(addr = %bound, scheme, "listening for peers");
+        println!("listening on {}://{}", scheme, bound);
     } else if let Some(url) = &rendezvous_url {
         // Hand off to the supervisor: it does the initial connect with
         // backoff and reconnects automatically if the rendezvous goes away.
@@ -120,6 +142,20 @@ async fn merge_authorized_keys(vault: &Vault, raw: &str) -> Result<()> {
         info!(added, "merged keys from --authorized-keys / AGENTSYNC_AUTHORIZED_KEYS");
     }
     Ok(())
+}
+
+/// True when `var` is set to a recognisable "yes" value. Supports the
+/// usual sysadmin shorthand (`1`, `true`, `yes`, `on`) so deployment
+/// dashboards that store env vars as plain strings work without surprise.
+/// Empty / unset / `0` / `false` / `no` / `off` are all false.
+fn env_truthy(var: &str) -> bool {
+    match std::env::var(var) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 /// Parse an `--identity-agent-pubkey` argument: either a literal

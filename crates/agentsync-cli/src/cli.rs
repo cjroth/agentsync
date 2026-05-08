@@ -1,8 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-pub use agentsync_core::DEFAULT_LISTEN_ADDR;
-
 #[derive(Debug, Parser)]
 #[command(name = "agentsync", version, about = "Real-time directory sync engine")]
 pub struct Cli {
@@ -116,15 +114,30 @@ pub struct InitArgs {
     pub no_ignore_files: bool,
 }
 
+/// Sentinel string for `--listen` with no value. Resolved at runtime so the
+/// effective default depends on `--no-tls` (port 443 with TLS, 80 without).
+pub const LISTEN_DEFAULT_SENTINEL: &str = "<default>";
+
 #[derive(Debug, Args)]
 pub struct WatchArgs {
-    /// Bind a websocket listener on ADDR (acts as rendezvous). If the flag is
-    /// passed without a value, defaults to `0.0.0.0:443` — privileged on
-    /// Unix; see the README for `setcap` / launchd-socket-activation
-    /// instructions, or pass an unprivileged port explicitly
+    /// Bind a websocket listener on ADDR (acts as rendezvous). If the flag
+    /// is passed without a value, defaults to `0.0.0.0:443` (or
+    /// `0.0.0.0:80` when combined with `--no-tls`). 443 / 80 are
+    /// privileged on Unix; see the README for `setcap` / launchd-socket-
+    /// activation instructions, or pass an unprivileged port explicitly
     /// (`--listen 0.0.0.0:8443`).
-    #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_LISTEN_ADDR)]
+    #[arg(long, num_args = 0..=1, default_missing_value = LISTEN_DEFAULT_SENTINEL)]
     pub listen: Option<String>,
+    /// Bind without in-process TLS — accept plain WebSocket connections.
+    /// Use when an upstream reverse proxy (Fly.io, Railway, …) terminates
+    /// TLS at the edge and forwards plain HTTP/WS to the hub. Channel
+    /// binding degrades in this mode; trust falls back to the hub
+    /// identity signature alone, which is still TOFU-pinned per vault.
+    /// Also enabled by setting `AGENTSYNC_NO_TLS=1` (handy for managed
+    /// platforms where you toggle env vars rather than override the start
+    /// command).
+    #[arg(long)]
+    pub no_tls: bool,
     /// Override the rendezvous URL configured in config.toml.
     #[arg(long)]
     pub rendezvous: Option<String>,
@@ -153,7 +166,9 @@ pub struct WatchArgs {
 
 #[derive(Debug, Args)]
 pub struct CloneArgs {
-    /// Rendezvous WebSocket URL of the remote vault (e.g. wss://host:port).
+    /// Rendezvous URL of the remote vault. Accepts `wss://host:port`,
+    /// `ws://host:port`, or a bare host (`my-hub`, `my-hub:8443`) which
+    /// is taken as `wss://host` (or `ws://host` with `--no-tls`).
     pub remote_url: String,
     /// Local directory to clone into. Defaults to the remote vault's
     /// `name` (probed during the handshake) or, failing that, the URL
@@ -173,6 +188,10 @@ pub struct CloneArgs {
     /// prompt. Suitable for CI / scripted setups.
     #[arg(long)]
     pub accept_hub_key: Option<String>,
+    /// When the remote URL has no scheme, default to `ws://` (plain) instead
+    /// of `wss://`. Use when the hub runs without in-process TLS.
+    #[arg(long)]
+    pub no_tls: bool,
 }
 
 #[derive(Debug, Args)]
@@ -371,13 +390,14 @@ mod tests {
     }
 
     #[test]
-    fn listen_without_value_uses_default_addr() {
+    fn listen_without_value_uses_sentinel() {
         let cli = Cli::try_parse_from(["agentsync", "watch", "--listen"]).unwrap();
         let listen = match cli.command {
             Command::Watch(args) => args.listen,
             _ => panic!("expected watch"),
         };
-        assert_eq!(listen.as_deref(), Some(DEFAULT_LISTEN_ADDR));
+        // Sentinel — runtime resolves it to 0.0.0.0:443 (or :80 with --no-tls).
+        assert_eq!(listen.as_deref(), Some(LISTEN_DEFAULT_SENTINEL));
     }
 
     #[test]
