@@ -15,11 +15,13 @@ pub async fn run(args: InitArgs) -> Result<()> {
     }
 
     let rendezvous = args.rendezvous.as_deref().map(normalize_rendezvous_url);
+    let name = args.name.clone().or_else(|| default_name_from_path(&path));
 
     // Build the config first so we know where the identity should land.
     let mut cfg = ConfigFile {
         vault: VaultSection {
             id: None,
+            name: name.clone(),
             rendezvous_url: rendezvous.clone(),
             hub_pubkey: None,
         },
@@ -62,6 +64,10 @@ pub async fn run(args: InitArgs) -> Result<()> {
 
     println!("Initialized agentsync vault.");
     println!("vault_id      = {}", created.vault_id);
+    println!(
+        "name          = {}",
+        name.as_deref().unwrap_or("(unnamed)")
+    );
     println!("identity_pub  = {}", identity.pubkey().to_ssh_string());
     println!("identity_path = {}", id_path.display());
     println!();
@@ -71,6 +77,17 @@ pub async fn run(args: InitArgs) -> Result<()> {
          in authorized_keys."
     );
     Ok(())
+}
+
+/// Default vault name derived from the basename of `path`. Returns `None`
+/// for degenerate cases (root, empty, current-dir literals) so the caller
+/// can decide whether to prompt or store an empty name.
+fn default_name_from_path(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    Some(name)
 }
 
 /// Ensure `path` contains `entry` on its own line. Creates the file if

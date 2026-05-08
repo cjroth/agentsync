@@ -15,6 +15,7 @@ pub async fn run(args: DiffArgs) -> Result<()> {
         identity,
         storage_path: path.join(".agentsync"),
         hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
+        name: cfg.vault.name.clone(),
     })
     .await?;
     let files = vault.list_files().await?;

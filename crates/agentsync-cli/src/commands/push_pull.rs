@@ -16,6 +16,7 @@ pub async fn run_push(args: PushPullArgs) -> Result<()> {
         identity,
         storage_path: path.join(".agentsync"),
         hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
+        name: cfg.vault.name.clone(),
     };
     let mut vault = Vault::open(opts).await?;
     let _binding = vault

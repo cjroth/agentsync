@@ -27,6 +27,7 @@ async fn doc_bin_round_trip() {
         identity: created.identity,
         storage_path: storage,
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();

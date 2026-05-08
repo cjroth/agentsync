@@ -59,6 +59,7 @@ async fn make_pair() -> (Vault, tempfile::TempDir, Vault, tempfile::TempDir) {
         identity: client_identity,
         storage_path: client_dir.path().join(".agentsync"),
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();

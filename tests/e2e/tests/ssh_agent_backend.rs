@@ -65,6 +65,7 @@ async fn agent_backed_peer_syncs_with_file_backed_hub() {
         identity,
         storage_path: client_dir.path().join(".agentsync"),
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();

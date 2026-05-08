@@ -92,6 +92,11 @@ pub enum HubOp {
 pub struct InitArgs {
     #[arg(long)]
     pub rendezvous: Option<String>,
+    /// Display name for this vault. Defaults to the basename of the vault
+    /// directory. Sent in the handshake so cloning peers can default the
+    /// local directory name.
+    #[arg(long)]
+    pub name: Option<String>,
     /// Override the identity-secret path. Defaults to
     /// `~/.agentsync/id_ed25519` (shared across vaults, like
     /// `~/.ssh/id_ed25519`).
@@ -129,15 +134,23 @@ pub struct WatchArgs {
     /// backend to `agent`.
     #[arg(long)]
     pub identity_agent_pubkey: Option<String>,
+    /// Extra public keys to merge into `authorized_keys` on startup. Accepts
+    /// the same SSH-style format as the file itself (newline-separated
+    /// `ssh-ed25519 <base64> [comment]` entries; comments and blank lines
+    /// allowed). Falls back to the `AGENTSYNC_AUTHORIZED_KEYS` env var.
+    /// Useful for bootstrapping a fresh server (e.g. from a Fly.io secret).
+    #[arg(long, env = "AGENTSYNC_AUTHORIZED_KEYS")]
+    pub authorized_keys: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct CloneArgs {
-    /// Local directory to clone into.
-    pub local_path: PathBuf,
-    /// Rendezvous WebSocket URL (e.g. ws://host:port).
-    #[arg(long)]
-    pub rendezvous: String,
+    /// Rendezvous WebSocket URL of the remote vault (e.g. wss://host:port).
+    pub remote_url: String,
+    /// Local directory to clone into. Defaults to the remote vault's
+    /// `name` (probed during the handshake) or, failing that, the URL
+    /// hostname.
+    pub local_path: Option<PathBuf>,
     /// Path for the local identity secret. Defaults to
     /// `~/.agentsync/id_ed25519` (shared across vaults). If the file
     /// already exists, it's reused; otherwise a fresh ed25519 keypair is

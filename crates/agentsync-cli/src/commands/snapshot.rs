@@ -55,6 +55,7 @@ async fn open(path: &std::path::Path) -> Result<Vault> {
         identity,
         storage_path: path.join(".agentsync"),
         hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
+        name: cfg.vault.name.clone(),
     })
     .await?)
 }

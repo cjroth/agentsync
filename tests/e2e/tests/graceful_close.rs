@@ -57,6 +57,7 @@ async fn client_disconnect_releases_server_peer() {
         identity: client_identity,
         storage_path: client_dir.path().join(".agentsync"),
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();
@@ -130,6 +131,7 @@ async fn server_unlisten_releases_client_peer() {
         identity: client_identity,
         storage_path: client_dir.path().join(".agentsync"),
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();

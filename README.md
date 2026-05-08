@@ -14,10 +14,14 @@ agentsync --listen
 ```sh
 # Machine 2 — a peer
 agentsync key generate
-# Prints this device's pubkey. Paste it into authorized_keys on Machine 1
-# (or any device that already has the vault) and let it sync.
+# Generates a pubkey for this device at ~/.agentsync/id_ed25519.pub and prints it.
+# Paste it into authorized_keys on Machine 1 (or any device that already has the vault)
+# and let it sync.
 
-agentsync clone cloned-folder --rendezvous wss://machine-1
+agentsync clone wss://machine-1
+# Clones into a folder named after the remote vault's `name` (set on the
+# hub via `agentsync init --name <name>`). Pass an explicit dir if you
+# want to override: `agentsync clone wss://machine-1 my-folder`.
 # Default port is 1234, so :1234 is optional in the URL.
 # On first connect you'll be prompted to confirm Machine 1's identity (TOFU).
 # Pass --accept-hub-key <pubkey> to skip the prompt in scripts.
@@ -118,9 +122,9 @@ Requires Rust 1.89+.
 
 | Command | Description |
 | --- | --- |
-| `agentsync init` | Initialize a vault. Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` (skip with `--no-ignore-files`). |
-| `agentsync watch [path]` | Watch and sync a directory (default when no subcommand given). |
-| `agentsync clone <path> --rendezvous URL [--vault-id ID] [--accept-hub-key PK]` | Clone an existing vault. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. URL port defaults to 1234 if omitted. |
+| `agentsync init [--name NAME]` | Initialize a vault. Auto-generates a `name` from the directory basename (override with `--name`). Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` (skip with `--no-ignore-files`). |
+| `agentsync watch [path] [--authorized-keys KEYS]` | Watch and sync a directory (default when no subcommand given). `--authorized-keys` (or the `AGENTSYNC_AUTHORIZED_KEYS` env var) merges extra `ssh-ed25519` lines into the synced `authorized_keys` on startup — handy for bootstrapping a server from a Fly.io / Railway secret. |
+| `agentsync clone <url> [dir] [--vault-id ID] [--accept-hub-key PK]` | Clone an existing vault. The local directory defaults to the remote vault's `name` (read from the handshake); pass `dir` to override. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. URL port defaults to 1234 if omitted. |
 | `agentsync status` | Print connection state, vault id, and local pubkey. |
 | `agentsync push` / `pull` | One-shot sync. |
 | `agentsync restore-at <when>` | Restore to a point in time. Accepts epoch ms or relative offsets like `5m`, `2h`, `1d`, `1w`. |
@@ -145,7 +149,7 @@ my-vault/
 ├── .gitignore                   ← seeded by `init` to ignore .agentsync/
 ├── .agentsignore                ← same, for agentsync's own ingest filter
 ├── .agentsync/                  ← per-vault state, managed by the CLI
-│   ├── config.toml              ← vault id, rendezvous url, identity path, hub_pubkey
+│   ├── config.toml              ← vault id, name, rendezvous url, identity path, hub_pubkey
 │   ├── doc.bin                  ← saved Automerge document (full history)
 │   ├── snapshots/index.json     ← named labels → heads
 │   └── blobs/<sha256>           ← binary attachments
@@ -162,6 +166,29 @@ Back up `.agentsync/` with any tool you like (restic, borgbackup, rclone) — it
 contains the full document history. `.agentsync-server/` only matters if this
 device runs `--listen`; deleting it just regenerates the cert (existing peers
 will need to re-pin the new fingerprint).
+
+## Running as a hub (Docker / Fly.io / Railway)
+
+The included `Dockerfile` builds a tiny image that runs `agentsync watch
+--listen` on a persisted volume. Two env vars control bootstrap:
+
+- `AGENTSYNC_VAULT_NAME` — name written into `config.toml` on first launch.
+  Used as the default local directory when peers run
+  `agentsync clone wss://your-host`.
+- `AGENTSYNC_AUTHORIZED_KEYS` — newline-separated `ssh-ed25519 <base64> [comment]`
+  entries (same format as the `authorized_keys` file). Merged into the
+  synced `authorized_keys` on every `watch` startup; existing keys are
+  skipped, so it's safe to leave set across restarts.
+
+Fly.io example (see `fly.toml`):
+
+```sh
+fly launch
+fly secrets set AGENTSYNC_AUTHORIZED_KEYS="$(cat ~/.agentsync/id_ed25519.pub)"
+# After first deploy, pin the hub's identity locally:
+fly logs | grep identity_pub
+agentsync clone wss://your-app.fly.dev --accept-hub-key "ssh-ed25519 ..."
+```
 
 ## Testing
 

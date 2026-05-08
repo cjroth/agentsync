@@ -59,6 +59,7 @@ async fn one_writer_one_reader_propagates() {
         identity: client_identity,
         storage_path: client_dir.path().join(".agentsync"),
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();
@@ -150,6 +151,7 @@ async fn concurrent_edits_converge() {
                 identity,
                 storage_path: dir.path().join(".agentsync"),
                 hub_pubkey: None,
+        name: None,
             })
             .await
             .unwrap();
@@ -212,6 +214,7 @@ async fn unauthorized_peer_is_rejected() {
         identity: intruder,
         storage_path: client_dir.path().join(".agentsync"),
         hub_pubkey: None,
+        name: None,
     })
     .await
     .unwrap();

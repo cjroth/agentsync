@@ -3,6 +3,16 @@ primary_region = "ewr"
 
 [build]
 
+# Startup-time configuration. AGENTSYNC_VAULT_NAME is the human-readable
+# vault name written into config.toml on first launch (used by clients as
+# the default local dir when running `agentsync clone <url>`).
+# AGENTSYNC_AUTHORIZED_KEYS is read directly by `agentsync watch` and merged
+# into the synced authorized_keys file on every start — store actual keys
+# as a Fly secret rather than here, e.g.:
+#   fly secrets set AGENTSYNC_AUTHORIZED_KEYS="$(cat ~/.agentsync/id_ed25519.pub)"
+[env]
+  AGENTSYNC_VAULT_NAME = "vault"
+
 [http_service]
   internal_port = 1234
   force_https = true

@@ -21,9 +21,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/target/release/agentsync /usr/local/bin/agentsync
 
 ENV HOME=/data \
-    AGENTSYNC_LOG=info
+    AGENTSYNC_LOG=info \
+    AGENTSYNC_VAULT_NAME=vault
 
 WORKDIR /data/vault
 EXPOSE 1234
 
-CMD ["sh", "-c", "mkdir -p /data/vault && cd /data/vault && { [ -f .agentsync/config.toml ] || agentsync init; } && exec agentsync watch --listen 0.0.0.0:${PORT:-1234}"]
+# On startup:
+#   - init the vault if it doesn't exist yet, naming it after
+#     $AGENTSYNC_VAULT_NAME (defaults to "vault"). The name is sent in the
+#     handshake so `agentsync clone <url>` defaults the local dir to it.
+#   - merge any pubkeys from $AGENTSYNC_AUTHORIZED_KEYS into the synced
+#     authorized_keys (env var read directly by `watch`). Restart-safe:
+#     keys already present are skipped.
+CMD ["sh", "-c", "mkdir -p /data/vault && cd /data/vault && { [ -f .agentsync/config.toml ] || agentsync init --name \"$AGENTSYNC_VAULT_NAME\"; } && exec agentsync watch --listen 0.0.0.0:${PORT:-1234}"]

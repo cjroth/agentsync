@@ -80,23 +80,23 @@ async fn open_websocket(url: &str) -> Result<(WsStream, [u8; 32])> {
 /// Probe a hub: do the full four-message handshake to learn the hub's
 /// vault_id and identity pubkey, then close.
 pub async fn discover_vault_id(url: &str, identity: &Identity) -> Result<String> {
-    let (vault_id, _hub_pubkey, _ws) = probe_handshake(url, identity).await?;
+    let (vault_id, _hub_pubkey, _vault_name, _ws) = probe_handshake(url, identity).await?;
     Ok(vault_id)
 }
 
 async fn probe_handshake(
     url: &str,
     identity: &Identity,
-) -> Result<(String, Pubkey, WsStream)> {
+) -> Result<(String, Pubkey, Option<String>, WsStream)> {
     let (ws, cert_fp) = open_websocket(url).await?;
     let (mut writer, mut reader) = ws.split();
 
-    let (vault_id, hub_pubkey, _) =
+    let (vault_id, hub_pubkey, vault_name, _) =
         run_handshake(&mut writer, &mut reader, identity, cert_fp).await?;
     let ws = writer.reunite(reader).map_err(|e| {
         Error::Network(format!("reunite ws after handshake: {}", e))
     })?;
-    Ok((vault_id, hub_pubkey, ws))
+    Ok((vault_id, hub_pubkey, vault_name, ws))
 }
 
 async fn run_handshake<S>(
@@ -104,18 +104,25 @@ async fn run_handshake<S>(
     reader: &mut SplitStream<WebSocketStream<S>>,
     identity: &Identity,
     expected_cert_fp: [u8; 32],
-) -> Result<(String, Pubkey, Vec<u8>)>
+) -> Result<(String, Pubkey, Option<String>, Vec<u8>)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let frame = read_one_frame(reader).await?;
-    let (vault_id, hub_pubkey_bytes, hub_nonce_bytes, advertised_fp) = match frame {
+    let (vault_id, hub_pubkey_bytes, hub_nonce_bytes, advertised_fp, vault_name) = match frame {
         Frame::HelloHub {
             vault_id,
             hub_identity_pubkey,
             hub_nonce,
             tls_cert_fingerprint,
-        } => (vault_id, hub_identity_pubkey, hub_nonce, tls_cert_fingerprint),
+            vault_name,
+        } => (
+            vault_id,
+            hub_identity_pubkey,
+            hub_nonce,
+            tls_cert_fingerprint,
+            vault_name,
+        ),
         Frame::Error { message } => return Err(Error::Auth(message)),
         _ => return Err(Error::Protocol("expected HelloHub".into())),
     };
@@ -170,7 +177,7 @@ where
     };
     writer.send(Message::binary(proof_peer.encode()?)).await?;
 
-    Ok((vault_id, hub_pubkey, transcript))
+    Ok((vault_id, hub_pubkey, vault_name, transcript))
 }
 
 pub struct ClientConn {
@@ -182,6 +189,9 @@ pub struct ClientConn {
     peer_id: u64,
     pub vault_id: String,
     pub hub_pubkey: Pubkey,
+    /// The remote vault's display name from its `[vault] name` config, if any.
+    /// `None` for hubs predating the field.
+    pub vault_name: Option<String>,
     closed_notify: Arc<Notify>,
     is_closed: Arc<AtomicBool>,
 }
@@ -261,7 +271,7 @@ impl ClientConn {
         info!(url, "connected to rendezvous");
         let (mut writer, mut reader) = ws.split();
 
-        let (vault_id, hub_pubkey, _) =
+        let (vault_id, hub_pubkey, vault_name, _) =
             run_handshake(&mut writer, &mut reader, &identity, cert_fp).await?;
 
         if let Some(expected) = &expected_vault_id {
@@ -386,6 +396,7 @@ impl ClientConn {
             peer_id,
             vault_id,
             hub_pubkey,
+            vault_name,
             closed_notify,
             is_closed,
         })

@@ -24,6 +24,11 @@ pub enum Frame {
         hub_nonce: Vec<u8>,
         #[serde(with = "serde_bytes")]
         tls_cert_fingerprint: Vec<u8>,
+        /// Vault display name from the hub's local config. Used by `clone`
+        /// to default the local directory name when the user doesn't pass
+        /// one. Optional for backward compat with hubs predating the field.
+        #[serde(default)]
+        vault_name: Option<String>,
     },
     /// Peer → hub, second handshake message.
     #[serde(rename = "hello_peer")]

@@ -15,10 +15,12 @@ pub async fn run(args: StatusArgs) -> Result<()> {
         identity,
         storage_path: path.join(".agentsync"),
         hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
+        name: cfg.vault.name.clone(),
     };
     let vault = Vault::open(opts).await?;
     let files = vault.list_files().await?;
     println!("vault_id:       {}", vault_id);
+    println!("name:           {}", cfg.vault.name.as_deref().unwrap_or("(unnamed)"));
     println!("storage:        {}", vault.storage_path().display());
     println!(
         "rendezvous:     {}",

@@ -44,9 +44,8 @@ async fn clone_against_portless_url_attempts_port_1234() {
         Duration::from_secs(8),
         tokio::process::Command::new(&binary)
             .arg("clone")
-            .arg(dir.path().join("vault"))
-            .arg("--rendezvous")
             .arg(url)
+            .arg(dir.path().join("vault"))
             .arg("--accept-hub-key")
             .arg("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
             .output(),

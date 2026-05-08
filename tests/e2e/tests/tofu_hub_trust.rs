@@ -42,9 +42,8 @@ async fn accept_hub_key_pins_in_config() {
     let hub_pubkey = v.rendezvous.identity.pubkey().to_ssh_string();
     let mut child = tokio::process::Command::new(&binary)
         .arg("clone")
-        .arg(&target_path)
-        .arg("--rendezvous")
         .arg(&v.rendezvous_url)
+        .arg(&target_path)
         .arg("--accept-hub-key")
         .arg(&hub_pubkey)
         .arg("--identity")
@@ -97,6 +96,7 @@ async fn pinned_mismatch_is_rejected_in_process() {
         identity: client_identity.clone(),
         storage_path: dir_ok.path().join(".agentsync"),
         hub_pubkey: Some(server_identity.pubkey()),
+        name: None,
     })
     .await
     .unwrap();
@@ -112,6 +112,7 @@ async fn pinned_mismatch_is_rejected_in_process() {
         identity: client_identity,
         storage_path: dir_bad.path().join(".agentsync"),
         hub_pubkey: Some(other_identity.pubkey()),
+        name: None,
     })
     .await
     .unwrap();

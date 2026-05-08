@@ -37,6 +37,9 @@ pub struct OpenOptions {
     /// `None`, any hub identity is accepted; the caller is responsible for
     /// running the trust prompt if interactive.
     pub hub_pubkey: Option<Pubkey>,
+    /// Display name for this vault, sent in the handshake so cloning peers
+    /// can default the local directory name.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +205,7 @@ async fn connect_with_backoff(
 pub struct VaultConfig {
     pub rendezvous_url: Option<String>,
     pub hub_pubkey: Option<Pubkey>,
+    pub name: Option<String>,
     pub save_interval: Duration,
     pub save_after_changes: u32,
 }
@@ -211,6 +215,7 @@ impl Default for VaultConfig {
         Self {
             rendezvous_url: None,
             hub_pubkey: None,
+            name: None,
             save_interval: Duration::from_secs(1),
             save_after_changes: 100,
         }
@@ -292,6 +297,11 @@ impl Vault {
         ))
     }
 
+    /// The display name carried in the handshake (from `OpenOptions.name`).
+    pub fn name(&self) -> Option<&str> {
+        self.inner.config.name.as_deref()
+    }
+
     pub async fn open(opts: OpenOptions) -> Result<Self> {
         let storage = opts.storage_path.clone();
         let doc_store = DocStore::new(&storage);
@@ -330,6 +340,7 @@ impl Vault {
             config: VaultConfig {
                 rendezvous_url: opts.rendezvous_url,
                 hub_pubkey: opts.hub_pubkey,
+                name: opts.name,
                 ..Default::default()
             },
         });
@@ -656,6 +667,7 @@ impl Vault {
         let server = Server::bind(
             addr,
             self.inner.vault_id.clone(),
+            self.inner.config.name.clone(),
             self.inner.identity.clone(),
             Arc::new(VaultSyncHandle {
                 inner: self.inner.clone(),

@@ -87,9 +87,8 @@ async fn keyless_clone_via_subprocess() {
     let hub_pubkey = v.rendezvous.identity.pubkey().to_ssh_string();
     let mut child = tokio::process::Command::new(&binary)
         .arg("clone")
-        .arg(&target_path)
-        .arg("--rendezvous")
         .arg(&v.rendezvous_url)
+        .arg(&target_path)
         .arg("--accept-hub-key")
         .arg(&hub_pubkey)
         .arg("--identity")

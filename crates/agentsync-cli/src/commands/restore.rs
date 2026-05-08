@@ -18,6 +18,7 @@ pub async fn run_restore_at(args: RestoreAtArgs) -> Result<()> {
         identity,
         storage_path: path.join(".agentsync"),
         hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
+        name: cfg.vault.name.clone(),
     };
     let mut vault = Vault::open(opts).await?;
     let binding = vault

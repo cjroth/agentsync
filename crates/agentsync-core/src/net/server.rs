@@ -40,6 +40,7 @@ impl Server {
     pub async fn bind(
         addr: SocketAddr,
         vault_id: String,
+        vault_name: Option<String>,
         identity: Identity,
         sync_handle: Arc<dyn SyncHandle>,
         cert_der: Vec<u8>,
@@ -62,6 +63,7 @@ impl Server {
         let identity_for_accept = identity.clone();
         let sync_handle_for_accept = sync_handle.clone();
         let vault_id_for_accept = vault_id.clone();
+        let vault_name_for_accept = vault_name.clone();
         let acceptor_for_accept = acceptor.clone();
         let accept = tokio::spawn(async move {
             loop {
@@ -77,6 +79,7 @@ impl Server {
                             }
                         };
                         let vault_id = vault_id_for_accept.clone();
+                        let vault_name = vault_name_for_accept.clone();
                         let identity = identity_for_accept.clone();
                         let sync_handle = sync_handle_for_accept.clone();
                         let acceptor = acceptor_for_accept.clone();
@@ -93,6 +96,7 @@ impl Server {
                                 tls_stream,
                                 peer_addr,
                                 vault_id,
+                                vault_name,
                                 identity,
                                 sync_handle,
                                 cert_fp,
@@ -213,6 +217,7 @@ async fn handle_peer(
     stream: AcceptedStream,
     peer_addr: SocketAddr,
     vault_id: String,
+    vault_name: Option<String>,
     identity: Identity,
     sync_handle: Arc<dyn SyncHandle>,
     cert_fp: [u8; 32],
@@ -231,6 +236,7 @@ async fn handle_peer(
         hub_identity_pubkey: hub_pubkey.as_bytes().to_vec(),
         hub_nonce: hub_nonce.to_vec(),
         tls_cert_fingerprint: tls_fp.clone(),
+        vault_name,
     };
     writer.send(Message::binary(hello_hub.encode()?)).await?;
 

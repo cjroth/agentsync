@@ -15,6 +15,7 @@ pub async fn run(args: CompactArgs) -> Result<()> {
         identity,
         storage_path: path.join(".agentsync"),
         hub_pubkey: config::resolve_hub_pubkey(&cfg)?,
+        name: cfg.vault.name.clone(),
     })
     .await?;
     // Re-saving the doc forces Automerge to repack columnar storage.
