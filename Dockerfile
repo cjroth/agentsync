@@ -37,9 +37,13 @@ EXPOSE 443
 #
 # Environment knobs:
 #   PORT                  bind port (default 443)
+#   AGENTSYNC_CWD         vault directory (default /data/vault). Set this
+#                         when the platform mounts the persistent volume
+#                         somewhere else — e.g. Railway uses
+#                         /mnt/workspace.
 #   AGENTSYNC_NO_TLS=1    bind plain WS instead of WSS — use behind a
 #                         reverse proxy that already terminates TLS
 #                         (Railway, Render, Cloudflare Tunnel, …).
 #                         Read by `agentsync watch` directly; no CMD
 #                         override needed.
-CMD ["sh", "-c", "mkdir -p /data/vault && cd /data/vault && { [ -f .agentsync/config.toml ] || agentsync init --name \"$AGENTSYNC_VAULT_NAME\"; } && exec agentsync watch --listen 0.0.0.0:${PORT:-443}"]
+CMD ["sh", "-c", "VAULT_DIR=\"${AGENTSYNC_CWD:-/data/vault}\" && mkdir -p \"$VAULT_DIR\" && cd \"$VAULT_DIR\" && { [ -f .agentsync/config.toml ] || agentsync init --name \"$AGENTSYNC_VAULT_NAME\"; } && exec agentsync watch --listen 0.0.0.0:${PORT:-443}"]
