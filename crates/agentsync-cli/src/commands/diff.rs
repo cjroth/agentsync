@@ -3,9 +3,10 @@ use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{OpenOptions, Vault};
 use anyhow::Result;
+use std::path::PathBuf;
 
-pub async fn run(args: DiffArgs) -> Result<()> {
-    let path = args.path.canonicalize().unwrap_or(args.path.clone());
+pub async fn run(cwd: PathBuf, args: DiffArgs) -> Result<()> {
+    let path = cwd.canonicalize().unwrap_or(cwd);
     let cfg = require_config(&path)?;
     let vault_id = cfg.vault.id.clone().unwrap();
     let identity = config::resolve_identity(&path, &cfg)?;

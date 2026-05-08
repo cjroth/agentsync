@@ -6,14 +6,11 @@ use agentsync_core::{
     OpenOptions, ReconnectOptions, Vault, AUTHORIZED_KEYS_FILE,
 };
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use tracing::info;
 
-pub async fn run(args: WatchArgs) -> Result<()> {
-    let path = match &args.path {
-        Some(p) => p.clone(),
-        None => std::env::current_dir()?,
-    };
-    let path = path.canonicalize().unwrap_or(path);
+pub async fn run(cwd: PathBuf, args: WatchArgs) -> Result<()> {
+    let path = cwd.canonicalize().unwrap_or(cwd);
     let mut cfg = require_config(&path)?;
     let vault_id = cfg
         .vault
