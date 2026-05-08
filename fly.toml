@@ -18,7 +18,7 @@ primary_region = "ewr"
   AGENTSYNC_NO_TLS = "1"
 
 [http_service]
-  internal_port = 443
+  internal_port = 8080
   force_https = true
   auto_stop_machines = "off"
   auto_start_machines = true
