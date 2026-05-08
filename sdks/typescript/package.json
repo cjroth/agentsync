@@ -1,0 +1,76 @@
+{
+  "name": "@agentsync/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for agentsync — Automerge-backed directory sync",
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/cjroth/agentsync",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cjroth/agentsync.git",
+    "directory": "sdks/typescript"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/web.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/web.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "default": "./dist/web.js"
+    },
+    "./node": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./wasm": {
+      "default": "./dist/wasm/agentsync_wasm_bg.wasm"
+    },
+    "./wasm/bundler": {
+      "types": "./dist/bundler/agentsync_wasm.d.ts",
+      "default": "./dist/bundler/agentsync_wasm.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "bun run build:wasm && bun run build:ts",
+    "lint": "biome check src test",
+    "lint:fix": "biome check --write src test",
+    "format": "biome format --write src test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test test/unit",
+    "test:e2e": "bun run build && node --test --experimental-strip-types --no-warnings=ExperimentalWarning test/e2e/*.test.ts",
+    "test:all": "bun run test && bun run test:e2e",
+    "prepublishOnly": "bun run build && bun run lint && bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.1.13",
+    "@types/node": "^22.9.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.3",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "bun": ">=1.1",
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "imports": {
+    "#wasm-nodejs": "./dist/nodejs/agentsync_wasm.js",
+    "#wasm-bundler": "./dist/bundler/agentsync_wasm.js"
+  }
+}
