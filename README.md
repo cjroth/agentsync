@@ -36,8 +36,8 @@ By default only `.md` and `.markdown` files sync; edit `[sync] extensions` in
 `.agentsync/config.toml` to include other extensions.
 
 * Dead-simple `agentsync` CLI that syncs between devices
-* The CLI wraps a Rust SDK that can be imported to any Rust app
-* Wasm support for TypeScript use cases is planned
+* The CLI wraps a Rust SDK ([`agentsync-core`](./crates/agentsync-core)) that can be imported to any Rust app
+* TypeScript / WebAssembly SDK at [`@agentsync/sdk`](./sdks/typescript) — same primitives as the Rust SDK, runs in Node, Bun, and the browser
 * Built on Automerge which uses CRDTs to prevent merge conflicts
 * Tag snapshots to easily go back to any point in time
 * Per-device ed25519 identities; authorization via a synced `authorized_keys` file (SSH-style)
@@ -106,13 +106,20 @@ agent_pubkey = "ssh-ed25519 AAAA..."
 
 ```
 crates/
-  agentsync-core/     # sync engine library
+  agentsync-core/     # sync engine library (compiles native + wasm32)
   agentsync-cli/      # `agentsync` binary
+  agentsync-wasm/     # wasm-bindgen wrappers for the TypeScript SDK
+sdks/
+  typescript/         # @agentsync/sdk — npm package built from agentsync-wasm
 tests/
   e2e/                # multi-peer end-to-end tests against the real binary
 SPEC.md               # product spec
 AUTH.md               # auth design
 ```
+
+The native engine and the wasm bindings share the exact same Automerge
+schema, frame codec, identity format, and `authorized_keys` parser — see
+the SDK README for which surface is exposed in JS.
 
 ## Build
 
@@ -121,7 +128,45 @@ cargo build --release
 ./target/release/agentsync --version
 ```
 
-Requires Rust 1.89+.
+Requires Rust 1.89+. To build the TypeScript SDK locally:
+
+```bash
+cd sdks/typescript
+bun install
+bun run build       # wasm-pack + tsc
+bun test test/unit  # 21 unit tests
+bun run test:e2e    # spins up an `agentsync` hub and sync-tests against it
+```
+
+## TypeScript / WASM SDK
+
+```ts
+import { Identity, Doc, decodeFrame } from '@agentsync/sdk';
+
+const id = Identity.generate();
+console.log(id.pubkey().toSshString());
+
+const doc = new Doc('vault-1');
+doc.writeTextFile('notes/hello.md', '# hello\n');
+const bytes = doc.save();          // ship over the wire
+const reloaded = Doc.load(bytes);  // on the other peer
+```
+
+For browsers / Vite / Rollup: `import { ... } from '@agentsync/sdk/web'`.
+The raw `.wasm` is also exposed at `@agentsync/sdk/wasm` for custom
+loaders.
+
+## Releases
+
+* **Rust crates** publish to crates.io on every push to `main` (as
+  `<base>-<sha>` pre-releases) and on `v*` tags (real semver). See
+  [`.github/workflows/publish-crates.yml`](./.github/workflows/publish-crates.yml).
+* **TypeScript SDK** publishes `@agentsync/sdk` to npm on the same
+  schedule (under the `next` dist-tag for main builds, `latest` for
+  tags). See [`.github/workflows/publish-npm.yml`](./.github/workflows/publish-npm.yml).
+* **CLI binaries** for linux x86_64/aarch64, macOS x86_64/aarch64, and
+  windows x86_64 attach to the GitHub Release on every `v*` tag. See
+  [`.github/workflows/release-binaries.yml`](./.github/workflows/release-binaries.yml).
 
 ## CLI commands
 

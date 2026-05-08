@@ -1,0 +1,109 @@
+name: Publish @agentsync/sdk to npm
+
+# Mirrors publish-crates.yml: every main push publishes
+# `<base>-<sha>` under the `next` dist-tag; every v* tag publishes the
+# tagged version under `latest`.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # for npm provenance
+
+    defaults:
+      run:
+        working-directory: sdks/typescript
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - name: Install binaryen (wasm-opt)
+        run: |
+          set -e
+          VER=version_119
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${VER}/binaryen-${VER}-x86_64-linux.tar.gz" \
+            | sudo tar xz -C /opt
+          sudo ln -sf "/opt/binaryen-${VER}/bin/wasm-opt" /usr/local/bin/wasm-opt
+          wasm-opt --version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build wasm + ts
+        run: bun run build
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun test test/unit
+
+      - name: Build CLI for e2e
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --bin agentsync
+
+      - name: E2E tests against real hub
+        env:
+          AGENTSYNC_BIN: ${{ github.workspace }}/target/release/agentsync
+        run: bun run test:e2e
+
+      - name: Determine version + npm tag
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            NPM_TAG=latest
+          else
+            BASE=$(node -p "require('./package.json').version")
+            SHA=$(git rev-parse --short HEAD)
+            VERSION="${BASE}-${SHA}"
+            NPM_TAG=next
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$NPM_TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing $VERSION under @${NPM_TAG}"
+
+      - name: Set package version
+        run: npm version --no-git-tag-version --allow-same-version "${{ steps.version.outputs.version }}"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag "${{ steps.version.outputs.tag }}" --provenance

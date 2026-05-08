@@ -2,5 +2,7 @@
 * After every change:
   * Ensure that you have good test coverage and all tests are passing.
   * Ensure that cargo compiles with no warnings or errors.
+  * If you touch `agentsync-core` or `agentsync-wasm`, also run `cargo check -p agentsync-core -p agentsync-wasm --target wasm32-unknown-unknown` — the wasm boundary is gated by `cfg(target_arch = "wasm32")` and breaks silently if you add a tokio/notify/rustls dep without conditionalizing it.
+  * If you touch `sdks/typescript/src/**` or the wasm crate, run `bun run build && bun run lint && bun test` from `sdks/typescript/` to verify the JS surface still builds, lints under biome, and unit-tests pass. The e2e tests need a real `agentsync` binary on PATH (or `AGENTSYNC_BIN` env var); CI builds it in the same job.
   * Self review your code
   * Run /simplify to simplify code

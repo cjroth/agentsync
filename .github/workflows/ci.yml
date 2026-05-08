@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (advisory)
+        run: cargo clippy --workspace --all-targets || true
+      - name: Test (native)
+        run: cargo test --workspace
+      - name: Wasm32 build sanity
+        run: cargo check -p agentsync-core -p agentsync-wasm --target wasm32-unknown-unknown
+
+  sdk:
+    runs-on: ubuntu-latest
+    needs: rust
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Build wasm + ts
+        run: bun run build
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun test test/unit
+
+      - name: Build CLI for e2e
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --bin agentsync
+
+      - name: E2E tests
+        env:
+          AGENTSYNC_BIN: ${{ github.workspace }}/target/release/agentsync
+        run: bun run test:e2e

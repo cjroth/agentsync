@@ -1,0 +1,96 @@
+name: Publish to crates.io
+
+# Mirrors the npm flow: every push to main publishes a pre-release
+# `<base>-<sha>` build, every `v*` tag publishes a real release. The
+# wasm crate ships through npm via publish-npm.yml, not crates.io.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-crates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        # The pre-existing repo carries some clippy lints we haven't
+        # cleaned up; gate publishing on tests instead of style. Run
+        # clippy as advisory.
+        run: cargo clippy --workspace --all-targets || true
+      - name: Test
+        run: cargo test --workspace
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Determine version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            BASE=$(grep -E '^version\s*=\s*"' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            SHA=$(git rev-parse --short HEAD)
+            VERSION="${BASE}-${SHA}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Set workspace version
+        # cargo-edit's --workspace updates each member, but does NOT update
+        # path+version dependencies between members (e.g. cli depends on
+        # core). Bumping each crate's manifest individually would do that
+        # via --bump, but here we want an explicit value, so do it manually
+        # for the inter-member edges.
+        run: |
+          cargo set-version --workspace "${{ steps.version.outputs.version }}"
+          cargo set-version --package agentsync-core "${{ steps.version.outputs.version }}"
+
+      - name: Publish agentsync-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p agentsync-core --allow-dirty
+
+      - name: Wait for crates.io to index core
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsSL "https://crates.io/api/v1/crates/agentsync-core/${{ steps.version.outputs.version }}" >/dev/null; then
+              echo "indexed"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "timed out waiting for crates.io to index agentsync-core"
+          exit 1
+
+      - name: Publish agentsync-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p agentsync-cli --allow-dirty
