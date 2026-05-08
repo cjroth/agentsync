@@ -1,0 +1,28 @@
+[package]
+name = "agentsync-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "WebAssembly bindings for agentsync-core"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+agentsync-core = { path = "../agentsync-core", version = "0.1.0", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde = { workspace = true }
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+# wasm-opt is run separately in CI when binaryen is available; disable the
+# automatic download in wasm-pack so local builds work in offline / restricted
+# environments. Override at the CI step with `wasm-pack build --release` and
+# a wasm-opt invocation, or set `wasm-opt = ["-Oz"]` in this section locally.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
