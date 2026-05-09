@@ -66,7 +66,9 @@ impl SyncIgnoreSet {
                     // file rather than aborting the whole walk.
                     continue;
                 }
-                let Ok(matcher) = builder.build() else { continue };
+                let Ok(matcher) = builder.build() else {
+                    continue;
+                };
                 let depth = dir
                     .strip_prefix(vault_root)
                     .map(|p| p.components().count())
@@ -167,10 +169,7 @@ mod tests {
     #[test]
     fn negation_overrides_earlier_pattern() {
         let dir = TempDir::new().unwrap();
-        write(
-            &dir.path().join(".syncignore"),
-            "*.log\n!keep.log\n",
-        );
+        write(&dir.path().join(".syncignore"), "*.log\n!keep.log\n");
         let set = SyncIgnoreSet::from_vault_root(dir.path());
         assert!(set.matches("foo.log", false));
         assert!(!set.matches("keep.log", false));

@@ -15,16 +15,15 @@ async fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let resolved = cli::resolve_args(&raw);
 
-    let parsed = match cli::Cli::try_parse_from(
-        std::iter::once("agentsync".to_string()).chain(resolved),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            // clap returns DisplayHelp / DisplayVersion as Err with ExitCode::SUCCESS
-            // semantics; print and exit cleanly without anyhow's "Error:" prefix.
-            e.exit();
-        }
-    };
+    let parsed =
+        match cli::Cli::try_parse_from(std::iter::once("agentsync".to_string()).chain(resolved)) {
+            Ok(p) => p,
+            Err(e) => {
+                // clap returns DisplayHelp / DisplayVersion as Err with ExitCode::SUCCESS
+                // semantics; print and exit cleanly without anyhow's "Error:" prefix.
+                e.exit();
+            }
+        };
 
     let cwd = parsed.cwd;
     match parsed.command {
@@ -91,10 +90,7 @@ fn install_completions(kind: cli::ShellKind, shell: Shell) -> Result<()> {
                  \tautoload -U compinit && compinit",
             ),
         ),
-        cli::ShellKind::Fish => (
-            home.join(".config/fish/completions/agentsync.fish"),
-            None,
-        ),
+        cli::ShellKind::Fish => (home.join(".config/fish/completions/agentsync.fish"), None),
         cli::ShellKind::PowerShell | cli::ShellKind::Elvish => {
             anyhow::bail!(
                 "--install isn't supported for {:?} (no conventional dropbox path); \
@@ -105,8 +101,7 @@ fn install_completions(kind: cli::ShellKind, shell: Shell) -> Result<()> {
     };
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut buf: Vec<u8> = Vec::new();
     let mut cmd = cli::Cli::command();
@@ -121,7 +116,8 @@ fn install_completions(kind: cli::ShellKind, shell: Shell) -> Result<()> {
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("AGENTSYNC_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_env("AGENTSYNC_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     // Logs go to stderr so they don't pollute stdout-based protocols (the
     // listen-port handshake the harness reads from stdout, etc).
     let _ = tracing_subscriber::fmt()

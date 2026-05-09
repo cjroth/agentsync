@@ -1,7 +1,7 @@
 use crate::constants::AUTHORIZED_KEYS_FILE;
 use crate::fs::adapter::{FilesystemAdapter, Watcher};
 use crate::fs::suppression::DirtySet;
-use crate::fs::sync_ignore::{SyncIgnoreSet, SYNC_IGNORE_FILENAME};
+use crate::fs::sync_ignore::{SYNC_IGNORE_FILENAME, SyncIgnoreSet};
 use crate::path as path_norm;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

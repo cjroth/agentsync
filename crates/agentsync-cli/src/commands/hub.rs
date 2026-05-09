@@ -13,7 +13,11 @@ pub async fn run(cwd: PathBuf, args: HubArgs) -> Result<()> {
             let mut cfg = read_or_default(&path)?;
             cfg.vault.hub_pubkey = Some(pk.to_ssh_string());
             write(&path, &cfg)?;
-            println!("pinned hub identity {} ({})", pk.to_ssh_string(), pk.fingerprint_sha256());
+            println!(
+                "pinned hub identity {} ({})",
+                pk.to_ssh_string(),
+                pk.fingerprint_sha256()
+            );
         }
         HubOp::Forget => {
             let mut cfg = read_or_default(&path)?;

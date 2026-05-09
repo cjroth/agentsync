@@ -6,7 +6,7 @@
 //! error.
 
 use agentsync_core::{BindOptions, CreateOptions, Identity, OpenOptions, Vault};
-use agentsync_e2e::{authorize_in_process, E2EVault};
+use agentsync_e2e::{E2EVault, authorize_in_process};
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -56,8 +56,7 @@ async fn accept_hub_key_pins_in_config() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let _ = child.kill().await;
 
-    let cfg = std::fs::read_to_string(target_path.join(".agentsync").join("config.toml"))
-        .unwrap();
+    let cfg = std::fs::read_to_string(target_path.join(".agentsync").join("config.toml")).unwrap();
     assert!(
         cfg.contains(&format!("hub_pubkey = \"{}\"", hub_pubkey)),
         "hub_pubkey not pinned in config.toml; got:\n{}",
@@ -100,7 +99,10 @@ async fn pinned_mismatch_is_rejected_in_process() {
     })
     .await
     .unwrap();
-    ok_client.connect().await.expect("matching pin should succeed");
+    ok_client
+        .connect()
+        .await
+        .expect("matching pin should succeed");
     ok_client.disconnect().await;
 
     // Mismatched pin: connect fails.

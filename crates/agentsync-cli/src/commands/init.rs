@@ -1,6 +1,8 @@
 use crate::cli::InitArgs;
-use crate::config::{config_path, identity_path, write, ConfigFile, IdentitySection, SyncSection, VaultSection};
-use agentsync_core::{normalize_rendezvous_url, CreateOptions, Identity, Vault};
+use crate::config::{
+    ConfigFile, IdentitySection, SyncSection, VaultSection, config_path, identity_path, write,
+};
+use agentsync_core::{CreateOptions, Identity, Vault, normalize_rendezvous_url};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -47,7 +49,9 @@ pub async fn run(cwd: PathBuf, args: InitArgs) -> Result<()> {
         Identity::load_from_file(&id_path).map_err(|e| anyhow::anyhow!(e))?
     } else {
         let fresh = Identity::generate();
-        fresh.save_to_file(&id_path).map_err(|e| anyhow::anyhow!(e))?;
+        fresh
+            .save_to_file(&id_path)
+            .map_err(|e| anyhow::anyhow!(e))?;
         fresh
     };
 
@@ -69,10 +73,7 @@ pub async fn run(cwd: PathBuf, args: InitArgs) -> Result<()> {
 
     println!("Initialized agentsync vault.");
     println!("vault_id      = {}", created.vault_id);
-    println!(
-        "name          = {}",
-        name.as_deref().unwrap_or("(unnamed)")
-    );
+    println!("name          = {}", name.as_deref().unwrap_or("(unnamed)"));
     println!("identity_pub  = {}", identity.pubkey().to_ssh_string());
     println!("identity_path = {}", id_path.display());
     println!();
@@ -113,8 +114,7 @@ fn ensure_ignore_entry(path: &Path, entry: &str) -> Result<()> {
     }
     body.push_str(entry);
     body.push('\n');
-    std::fs::write(path, body)
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(path, body).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

@@ -1,10 +1,10 @@
-use crate::cli::{WatchArgs, LISTEN_DEFAULT_SENTINEL};
+use crate::cli::{LISTEN_DEFAULT_SENTINEL, WatchArgs};
 use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{
-    normalize_with_scheme, parse_authorized_keys, render_authorized_keys, AuthorizedPeer,
-    OpenOptions, ReconnectOptions, Vault, AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR,
-    DEFAULT_LISTEN_ADDR_NO_TLS,
+    AUTHORIZED_KEYS_FILE, AuthorizedPeer, DEFAULT_LISTEN_ADDR, DEFAULT_LISTEN_ADDR_NO_TLS,
+    OpenOptions, ReconnectOptions, Vault, normalize_with_scheme, parse_authorized_keys,
+    render_authorized_keys,
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -144,7 +144,10 @@ async fn merge_authorized_keys(vault: &Vault, raw: &str) -> Result<()> {
         vault
             .write_text_file(AUTHORIZED_KEYS_FILE, &rendered)
             .await?;
-        info!(added, "merged keys from --authorized-keys / AGENTSYNC_AUTHORIZED_KEYS");
+        info!(
+            added,
+            "merged keys from --authorized-keys / AGENTSYNC_AUTHORIZED_KEYS"
+        );
     }
     Ok(())
 }
@@ -170,8 +173,7 @@ fn load_pubkey_arg(s: &str) -> Result<String> {
     if s.starts_with("ssh-") {
         return Ok(s.to_string());
     }
-    let bytes = std::fs::read_to_string(s)
-        .with_context(|| format!("read pubkey file at {}", s))?;
+    let bytes = std::fs::read_to_string(s).with_context(|| format!("read pubkey file at {}", s))?;
     let line = bytes
         .lines()
         .next()

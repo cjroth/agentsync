@@ -25,20 +25,20 @@ pub mod tls;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vault;
 
-pub use auth::{build_transcript, random_nonce, HANDSHAKE_DOMAIN, NONCE_LEN};
+pub use auth::{HANDSHAKE_DOMAIN, NONCE_LEN, build_transcript, random_nonce};
 pub use constants::{
-    normalize_rendezvous_url, normalize_with_scheme, AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR,
-    DEFAULT_LISTEN_ADDR_NO_TLS, DEFAULT_PORT, USER_IDENTITY_FILENAME, USER_STATE_DIR,
+    AUTHORIZED_KEYS_FILE, DEFAULT_LISTEN_ADDR, DEFAULT_LISTEN_ADDR_NO_TLS, DEFAULT_PORT,
+    USER_IDENTITY_FILENAME, USER_STATE_DIR, normalize_rendezvous_url, normalize_with_scheme,
 };
 pub use doc::{
-    content_hash, DirectoryMeta, Doc, FileId, FileKind, FileMeta, Label, SCHEMA_VERSION,
+    DirectoryMeta, Doc, FileId, FileKind, FileMeta, Label, SCHEMA_VERSION, content_hash,
 };
 pub use error::{Error, Result};
-pub use identity::{Identity, Pubkey, PUBKEY_LEN, SIGNATURE_LEN};
+pub use identity::{Identity, PUBKEY_LEN, Pubkey, SIGNATURE_LEN};
 pub use net::{Frame, HelloOp};
 pub use peers_md::{
-    parse_authorized_keys, parse_peers_md, render_authorized_keys, render_peers_md,
-    AuthorizedPeer, PEERS_FILE,
+    AuthorizedPeer, PEERS_FILE, parse_authorized_keys, parse_peers_md, render_authorized_keys,
+    render_peers_md,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

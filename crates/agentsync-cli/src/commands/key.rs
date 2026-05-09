@@ -1,5 +1,5 @@
 use crate::cli::{KeyArgs, KeyOp};
-use crate::config::{identity_path, read_or_default, write, ConfigFile, IdentitySection};
+use crate::config::{ConfigFile, IdentitySection, identity_path, read_or_default, write};
 use agentsync_core::Identity;
 use anyhow::{Context, Result};
 use std::path::PathBuf;

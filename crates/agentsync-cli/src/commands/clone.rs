@@ -1,9 +1,7 @@
 use crate::cli::CloneArgs;
-use crate::config::{
-    identity_path, write, ConfigFile, IdentitySection, SyncSection, VaultSection,
-};
+use crate::config::{ConfigFile, IdentitySection, SyncSection, VaultSection, identity_path, write};
 use agentsync_core::net::client::ClientConn;
-use agentsync_core::{normalize_with_scheme, Identity, OpenOptions, Pubkey, Vault};
+use agentsync_core::{Identity, OpenOptions, Pubkey, Vault, normalize_with_scheme};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 

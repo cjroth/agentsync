@@ -7,7 +7,10 @@ pub fn normalize(input: &str) -> Result<String> {
         return Err(Error::InvalidPath("path is empty".into()));
     }
 
-    let unified: String = input.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
+    let unified: String = input
+        .chars()
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
     let nfc: String = unified.nfc().collect();
 
     // Reject absolute paths and parent traversal.

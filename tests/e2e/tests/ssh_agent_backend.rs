@@ -6,10 +6,10 @@
 //! ways.
 
 use agentsync_core::{
-    agent::agent_list_identities_at, BindOptions, CreateOptions, Identity, OpenOptions,
-    Pubkey, Vault,
+    BindOptions, CreateOptions, Identity, OpenOptions, Pubkey, Vault,
+    agent::agent_list_identities_at,
 };
-use agentsync_e2e::{authorize_in_process, MockAgent};
+use agentsync_e2e::{MockAgent, authorize_in_process};
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use std::time::Duration;

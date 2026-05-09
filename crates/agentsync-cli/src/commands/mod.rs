@@ -1,14 +1,14 @@
-pub mod init;
-pub mod watch;
 pub mod clone;
-pub mod status;
+pub mod compact;
+pub mod diff;
+pub mod hub;
+pub mod init;
+pub mod key;
 pub mod push_pull;
 pub mod restore;
 pub mod snapshot;
-pub mod diff;
-pub mod compact;
-pub mod key;
-pub mod hub;
+pub mod status;
+pub mod watch;
 
 use std::path::Path;
 

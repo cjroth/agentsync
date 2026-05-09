@@ -111,11 +111,9 @@ pub fn read_or_default(vault_root: &Path) -> Result<ConfigFile> {
     if !path.exists() {
         return Ok(ConfigFile::default());
     }
-    let bytes =
-        std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let s = std::str::from_utf8(&bytes).context("config.toml not valid utf-8")?;
-    let cfg: ConfigFile = toml::from_str(s)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let cfg: ConfigFile = toml::from_str(s).with_context(|| format!("parse {}", path.display()))?;
     Ok(cfg)
 }
 
@@ -167,8 +165,7 @@ pub fn user_identity_default() -> PathBuf {
 /// `--identity-agent-pubkey` flag.
 pub fn resolve_identity(vault_root: &Path, cfg: &ConfigFile) -> Result<Identity> {
     if let Some(agent_pubkey_str) = cfg.identity.agent_pubkey.as_deref() {
-        let agent_pk = Pubkey::from_ssh_string(agent_pubkey_str)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let agent_pk = Pubkey::from_ssh_string(agent_pubkey_str).map_err(|e| anyhow::anyhow!(e))?;
         let socket = resolve_agent_socket(cfg)?;
         return Ok(Identity::from_agent(socket, agent_pk));
     }

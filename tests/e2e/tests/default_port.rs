@@ -20,8 +20,7 @@ async fn init_with_portless_rendezvous_persists_url_as_is() {
         .unwrap();
     assert!(out.status.success(), "init failed: {:?}", out);
 
-    let cfg = std::fs::read_to_string(dir.path().join(".agentsync").join("config.toml"))
-        .unwrap();
+    let cfg = std::fs::read_to_string(dir.path().join(".agentsync").join("config.toml")).unwrap();
     assert!(
         cfg.contains("rendezvous_url = \"wss://example.invalid\""),
         "config.toml mutated portless URL:\n{}",

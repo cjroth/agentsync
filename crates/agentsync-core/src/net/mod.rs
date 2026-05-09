@@ -10,6 +10,6 @@ pub mod transport;
 pub use protocol::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use client::{discover_vault_id, ClientConn};
+pub use client::{ClientConn, discover_vault_id};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{Server, ServerTls};

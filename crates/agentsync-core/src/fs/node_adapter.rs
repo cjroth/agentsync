@@ -2,8 +2,8 @@ use crate::doc::content_hash;
 use crate::error::{Error, Result};
 use crate::fs::adapter::{DirEntry, FilesystemAdapter, FsEvent, Watcher};
 use async_trait::async_trait;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify::Watcher as NotifyWatcher;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
@@ -42,10 +42,7 @@ impl FilesystemAdapter for NodeFsAdapter {
             }
         }
         let tmp = match path.file_name() {
-            Some(name) => path.with_file_name(format!(
-                ".{}.agentsync-tmp",
-                name.to_string_lossy()
-            )),
+            Some(name) => path.with_file_name(format!(".{}.agentsync-tmp", name.to_string_lossy())),
             None => return Err(Error::InvalidPath(path.display().to_string())),
         };
         fs::write(&tmp, content).await?;
@@ -88,35 +85,32 @@ impl FilesystemAdapter for NodeFsAdapter {
         Ok(content_hash(&bytes))
     }
 
-    fn watch(
-        &self,
-        path: &Path,
-        sink: mpsc::UnboundedSender<FsEvent>,
-    ) -> Result<Box<dyn Watcher>> {
+    fn watch(&self, path: &Path, sink: mpsc::UnboundedSender<FsEvent>) -> Result<Box<dyn Watcher>> {
         let path = path.to_path_buf();
         let sink = Arc::new(sink);
         let sink_cloned = sink.clone();
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let event = match res {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(error=%e, "notify error");
-                    return;
-                }
-            };
-            for path in &event.paths {
-                let p = path.clone();
-                match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => {
-                        let _ = sink_cloned.send(FsEvent::Touched(p));
+        let mut watcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let event = match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(error=%e, "notify error");
+                        return;
                     }
-                    EventKind::Remove(_) => {
-                        let _ = sink_cloned.send(FsEvent::Removed(p));
+                };
+                for path in &event.paths {
+                    let p = path.clone();
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            let _ = sink_cloned.send(FsEvent::Touched(p));
+                        }
+                        EventKind::Remove(_) => {
+                            let _ = sink_cloned.send(FsEvent::Removed(p));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-        })?;
+            })?;
         watcher.watch(&path, RecursiveMode::Recursive)?;
         Ok(Box::new(NotifyHandle { _watcher: watcher }))
     }

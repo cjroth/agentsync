@@ -33,9 +33,7 @@ async fn peer_reconnects_after_rendezvous_restart() {
     v.restart_rendezvous().await.unwrap();
 
     // After reconnect, a write on the peer must propagate to the rendezvous.
-    v.peer(0)
-        .save_atomic("after.md", "after-restart")
-        .unwrap();
+    v.peer(0).save_atomic("after.md", "after-restart").unwrap();
     v.rendezvous
         .wait_for_content("after.md", "after-restart", T)
         .await

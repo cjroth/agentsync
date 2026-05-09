@@ -1,4 +1,5 @@
-use crate::doc::{content_hash, Doc, FileKind, FileMeta, Label};
+use crate::constants::AUTHORIZED_KEYS_FILE;
+use crate::doc::{Doc, FileKind, FileMeta, Label, content_hash};
 use crate::error::{Error, Result};
 use crate::fs::adapter::{FilesystemAdapter, FsEvent};
 use crate::fs::binding::{BindOptions, Binding};
@@ -7,20 +8,19 @@ use crate::identity::{Identity, Pubkey};
 use crate::net::client::ClientConn;
 use crate::net::protocol::Frame;
 use crate::net::server::{Server, ServerTls};
-use crate::constants::AUTHORIZED_KEYS_FILE;
-use crate::peers_md::{parse_authorized_keys, render_authorized_keys, AuthorizedPeer};
+use crate::peers_md::{AuthorizedPeer, parse_authorized_keys, render_authorized_keys};
 use crate::store::{BlobStore, DocStore, SnapshotIndex};
 use async_trait::async_trait;
-use automerge::sync::{self as amsync, SyncDoc};
 use automerge::ChangeHash;
+use automerge::sync::{self as amsync, SyncDoc};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -288,13 +288,7 @@ impl Vault {
             inner: inner.clone(),
         };
         v.start_save_loop();
-        Ok((
-            v,
-            CreatedVault {
-                vault_id,
-                identity,
-            },
-        ))
+        Ok((v, CreatedVault { vault_id, identity }))
     }
 
     /// The display name carried in the handshake (from `OpenOptions.name`).
@@ -604,14 +598,7 @@ impl Vault {
         let inner = self.inner.clone();
         let handle = tokio::spawn(async move {
             'outer: loop {
-                let conn = match connect_with_backoff(
-                    &inner,
-                    &url,
-                    &opts,
-                    &mut shutdown_rx,
-                )
-                .await
-                {
+                let conn = match connect_with_backoff(&inner, &url, &opts, &mut shutdown_rx).await {
                     ConnectResult::Connected(c) => c,
                     ConnectResult::Shutdown => return,
                     ConnectResult::GaveUp => {
@@ -675,11 +662,7 @@ impl Vault {
         self.listen_with_tls(addr, ServerTls::Disabled).await
     }
 
-    async fn listen_with_tls(
-        &mut self,
-        addr: SocketAddr,
-        tls: ServerTls,
-    ) -> Result<SocketAddr> {
+    async fn listen_with_tls(&mut self, addr: SocketAddr, tls: ServerTls) -> Result<SocketAddr> {
         let server = Server::bind(
             addr,
             self.inner.vault_id.clone(),
@@ -709,11 +692,7 @@ impl Vault {
 
     // ---------- binding ----------
 
-    pub async fn bind_directory(
-        &mut self,
-        path: &Path,
-        opts: BindOptions,
-    ) -> Result<Arc<Binding>> {
+    pub async fn bind_directory(&mut self, path: &Path, opts: BindOptions) -> Result<Arc<Binding>> {
         let adapter: Arc<dyn FilesystemAdapter> = Arc::new(NodeFsAdapter::new());
         let mut binding = Binding::new(path, opts.clone(), adapter.clone());
 
@@ -1019,10 +998,8 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
         (doc.list_files()?, doc.list_directories()?)
     };
     tracing::trace!(count = files.len(), "materialize: scanning live files");
-    let live: HashMap<String, FileMeta> =
-        files.into_iter().map(|m| (m.path.clone(), m)).collect();
-    let live_dirs: std::collections::HashSet<String> =
-        dirs.into_iter().map(|d| d.path).collect();
+    let live: HashMap<String, FileMeta> = files.into_iter().map(|m| (m.path.clone(), m)).collect();
+    let live_dirs: std::collections::HashSet<String> = dirs.into_iter().map(|d| d.path).collect();
 
     {
         let mut materialized_dirs = binding.materialized_dirs.lock().await;
@@ -1042,8 +1019,7 @@ async fn materialize_inner(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> R
     }
 
     let existing: HashMap<String, String> = binding.materialized.lock().await.clone();
-    let last_ingested: HashMap<String, String> =
-        binding.last_ingested.lock().await.clone();
+    let last_ingested: HashMap<String, String> = binding.last_ingested.lock().await.clone();
 
     for path in existing.keys() {
         if !live.contains_key(path) {

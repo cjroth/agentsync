@@ -79,7 +79,9 @@ async fn appending_pubkey_to_authorized_keys_authorizes_peer() {
     let mut v = E2EVault::new().await.unwrap();
     let _ = v.add_peer("alice").await.unwrap();
 
-    v.peer(0).save_atomic("hello.md", "via authorized_keys").unwrap();
+    v.peer(0)
+        .save_atomic("hello.md", "via authorized_keys")
+        .unwrap();
     v.rendezvous
         .wait_for_content("hello.md", "via authorized_keys", T)
         .await

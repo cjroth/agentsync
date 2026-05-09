@@ -17,7 +17,11 @@ pub trait FilesystemAdapter: Send + Sync {
     async fn list(&self, path: &Path) -> Result<Vec<DirEntry>>;
     async fn exists(&self, path: &Path) -> bool;
     async fn hash(&self, path: &Path) -> Result<String>;
-    fn watch(&self, path: &Path, sink: tokio::sync::mpsc::UnboundedSender<FsEvent>) -> Result<Box<dyn Watcher>>;
+    fn watch(
+        &self,
+        path: &Path,
+        sink: tokio::sync::mpsc::UnboundedSender<FsEvent>,
+    ) -> Result<Box<dyn Watcher>>;
 }
 
 pub trait Watcher: Send + Sync {}

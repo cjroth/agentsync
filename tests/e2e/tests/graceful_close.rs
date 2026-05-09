@@ -41,10 +41,7 @@ async fn client_disconnect_releases_server_peer() {
         .bind_directory(server_dir.path(), BindOptions::default())
         .await
         .unwrap();
-    let bound = server
-        .listen("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let bound = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let url = format!("wss://{}", bound);
 
     let client_identity = Identity::generate();
@@ -82,7 +79,9 @@ async fn client_disconnect_releases_server_peer() {
     // Graceful disconnect. Should return promptly (under 2s — close path has
     // an internal timeout, but a clean Close exchange is far faster).
     let disconnect = tokio::time::timeout(Duration::from_secs(3), client.disconnect());
-    disconnect.await.expect("disconnect did not complete in time");
+    disconnect
+        .await
+        .expect("disconnect did not complete in time");
 
     // Server should drop its peer slot once the websocket close has been
     // exchanged. Allow a moment for the close frame to round-trip.
@@ -115,10 +114,7 @@ async fn server_unlisten_releases_client_peer() {
         .bind_directory(server_dir.path(), BindOptions::default())
         .await
         .unwrap();
-    let bound = server
-        .listen("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let bound = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let url = format!("wss://{}", bound);
 
     let client_identity = Identity::generate();
@@ -153,5 +149,8 @@ async fn server_unlisten_releases_client_peer() {
         client.peer_count().await == 0
     })
     .await;
-    assert!(cleared, "client still holds a peer slot after server unlisten");
+    assert!(
+        cleared,
+        "client still holds a peer slot after server unlisten"
+    );
 }

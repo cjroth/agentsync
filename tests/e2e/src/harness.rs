@@ -1,8 +1,8 @@
 use agentsync_core::{
-    render_authorized_keys, AuthorizedPeer, CreateOptions, Identity, Pubkey, Vault,
-    AUTHORIZED_KEYS_FILE,
+    AUTHORIZED_KEYS_FILE, AuthorizedPeer, CreateOptions, Identity, Pubkey, Vault,
+    render_authorized_keys,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -220,7 +220,11 @@ impl E2EVault {
         if bound_port != port {
             bail!("rendezvous rebound on a different port: wanted {port}, got {bound_port}");
         }
-        spawn_log_drainer(&mut child, "rendezvous", Some(self.rendezvous.stderr_lines.clone()));
+        spawn_log_drainer(
+            &mut child,
+            "rendezvous",
+            Some(self.rendezvous.stderr_lines.clone()),
+        );
         self.rendezvous.proc = Some(child);
         Ok(())
     }
@@ -239,8 +243,7 @@ impl E2EVault {
         write_config(rendezvous_dir.path(), &vault_id, None)?;
 
         // Reserve a free port by binding then immediately releasing it.
-        let probe = std::net::TcpListener::bind("127.0.0.1:0")
-            .context("reserve free port")?;
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").context("reserve free port")?;
         let port = probe.local_addr()?.port();
         drop(probe);
 
@@ -281,7 +284,11 @@ impl E2EVault {
         if bound_port != port {
             bail!("rendezvous bound a different port: wanted {port}, got {bound_port}");
         }
-        spawn_log_drainer(&mut child, "rendezvous", Some(self.rendezvous.stderr_lines.clone()));
+        spawn_log_drainer(
+            &mut child,
+            "rendezvous",
+            Some(self.rendezvous.stderr_lines.clone()),
+        );
         self.rendezvous.proc = Some(child);
         Ok(())
     }
@@ -440,12 +447,7 @@ impl Peer {
         self.save_truncate_with_gap(rel, content, Duration::from_millis(40))
     }
 
-    pub fn save_truncate_with_gap(
-        &self,
-        rel: &str,
-        content: &str,
-        gap: Duration,
-    ) -> Result<()> {
+    pub fn save_truncate_with_gap(&self, rel: &str, content: &str, gap: Duration) -> Result<()> {
         let final_path = self.abs(rel);
         if let Some(parent) = final_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -523,11 +525,7 @@ impl Peer {
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
-        bail!(
-            "timeout waiting for {}/{} to disappear",
-            self.name,
-            rel
-        )
+        bail!("timeout waiting for {}/{} to disappear", self.name, rel)
     }
 }
 
@@ -663,11 +661,7 @@ async fn wait_for_line(child: &mut Child, mut pred: impl FnMut(&str) -> bool) ->
     }
 }
 
-fn spawn_log_drainer(
-    child: &mut Child,
-    label: &str,
-    stderr_sink: Option<Arc<Mutex<Vec<String>>>>,
-) {
+fn spawn_log_drainer(child: &mut Child, label: &str, stderr_sink: Option<Arc<Mutex<Vec<String>>>>) {
     if let Some(out) = child.stdout.take() {
         let label = label.to_string();
         tokio::spawn(async move {
@@ -727,28 +721,38 @@ fn build_binary() -> Result<PathBuf> {
         let candidate = workspace
             .join("target")
             .join(profile)
-            .join(if cfg!(windows) { "agentsync.exe" } else { "agentsync" });
+            .join(if cfg!(windows) {
+                "agentsync.exe"
+            } else {
+                "agentsync"
+            });
         if candidate.exists() {
             return Ok(candidate);
         }
     }
 
-    let status = std::process::Command::new(
-        std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
-    )
-    .args(["build", "--bin", "agentsync"])
-    .current_dir(&workspace)
-    .status()
-    .context("invoke cargo build --bin agentsync")?;
+    let status =
+        std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["build", "--bin", "agentsync"])
+            .current_dir(&workspace)
+            .status()
+            .context("invoke cargo build --bin agentsync")?;
     if !status.success() {
         bail!("cargo build --bin agentsync failed");
     }
     let candidate = workspace
         .join("target")
         .join("debug")
-        .join(if cfg!(windows) { "agentsync.exe" } else { "agentsync" });
+        .join(if cfg!(windows) {
+            "agentsync.exe"
+        } else {
+            "agentsync"
+        });
     if candidate.exists() {
         return Ok(candidate);
     }
-    bail!("agentsync binary missing at {} after build", candidate.display());
+    bail!(
+        "agentsync binary missing at {} after build",
+        candidate.display()
+    );
 }

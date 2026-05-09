@@ -81,16 +81,8 @@ async fn init_appends_to_existing_files() {
     let home = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
 
-    std::fs::write(
-        dir.path().join(".gitignore"),
-        "node_modules/\ntarget/\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join(".agentsignore"),
-        "scratch/\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "node_modules/\ntarget/\n").unwrap();
+    std::fs::write(dir.path().join(".agentsignore"), "scratch/\n").unwrap();
 
     let out = tokio::process::Command::new(&binary)
         .arg("init")
@@ -102,7 +94,10 @@ async fn init_appends_to_existing_files() {
     assert!(out.status.success());
 
     let g = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-    assert!(g.contains("node_modules/"), "preserved existing .gitignore content");
+    assert!(
+        g.contains("node_modules/"),
+        "preserved existing .gitignore content"
+    );
     assert!(g.contains("target/"));
     assert!(g.lines().any(|l| l.trim() == ".agentsync/"));
 
@@ -117,11 +112,7 @@ async fn init_does_not_duplicate_existing_entry() {
     let home = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
 
-    std::fs::write(
-        dir.path().join(".gitignore"),
-        ".agentsync/\nother/\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(".gitignore"), ".agentsync/\nother/\n").unwrap();
 
     let out = tokio::process::Command::new(&binary)
         .arg("init")

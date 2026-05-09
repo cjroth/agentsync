@@ -1,11 +1,11 @@
 use crate::doc::{
-    content_hash, get_int, get_object, get_str, get_text, map_keys, new_id, now_ms, Doc, FileId,
-    FileKind, FileMeta,
+    Doc, FileId, FileKind, FileMeta, content_hash, get_int, get_object, get_str, get_text,
+    map_keys, new_id, now_ms,
 };
 use crate::error::{Error, Result};
 use crate::path;
-use automerge::transaction::Transactable;
 use automerge::ObjType;
+use automerge::transaction::Transactable;
 
 impl Doc {
     pub fn find_file_by_path(&mut self, path: &str) -> Result<Option<FileId>> {
@@ -141,8 +141,7 @@ impl Doc {
             if let Some((text_id, current)) = get_text(&mut self.inner, &entry, "content")? {
                 if current != content {
                     let len = current.chars().count();
-                    self.inner
-                        .splice_text(&text_id, 0, len as isize, content)?;
+                    self.inner.splice_text(&text_id, 0, len as isize, content)?;
                 }
             } else {
                 let text_id = self.inner.put_object(&entry, "content", ObjType::Text)?;
@@ -185,7 +184,8 @@ impl Doc {
             let entry = get_object(&mut self.inner, &files, &fid)?.unwrap();
             let meta = get_object(&mut self.inner, &entry, "meta")?.unwrap();
             self.inner.put(&entry, "binary_hash", hash)?;
-            self.inner.put(&meta, "kind", FileKind::Attachment.as_str())?;
+            self.inner
+                .put(&meta, "kind", FileKind::Attachment.as_str())?;
             self.inner.put(&meta, "size", size)?;
             self.inner.put(&meta, "updated_at", now)?;
             self.inner.delete(&meta, "deleted_at")?;
@@ -198,7 +198,8 @@ impl Doc {
         let entry = self.inner.put_object(&files, &fid, ObjType::Map)?;
         let meta = self.inner.put_object(&entry, "meta", ObjType::Map)?;
         self.inner.put(&meta, "path", path.as_str())?;
-        self.inner.put(&meta, "kind", FileKind::Attachment.as_str())?;
+        self.inner
+            .put(&meta, "kind", FileKind::Attachment.as_str())?;
         self.inner.put(&meta, "size", size)?;
         self.inner.put(&meta, "created_at", now)?;
         self.inner.put(&meta, "updated_at", now)?;

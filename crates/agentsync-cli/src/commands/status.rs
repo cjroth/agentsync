@@ -20,7 +20,10 @@ pub async fn run(cwd: PathBuf) -> Result<()> {
     let vault = Vault::open(opts).await?;
     let files = vault.list_files().await?;
     println!("vault_id:       {}", vault_id);
-    println!("name:           {}", cfg.vault.name.as_deref().unwrap_or("(unnamed)"));
+    println!(
+        "name:           {}",
+        cfg.vault.name.as_deref().unwrap_or("(unnamed)")
+    );
     println!("storage:        {}", vault.storage_path().display());
     println!(
         "rendezvous:     {}",

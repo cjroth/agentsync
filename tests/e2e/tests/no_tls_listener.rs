@@ -62,24 +62,24 @@ async fn plain_ws_round_trip() {
         .bind_directory(client_dir.path(), BindOptions::default())
         .await
         .unwrap();
-    client.connect().await.expect("plain ws connect should succeed");
+    client
+        .connect()
+        .await
+        .expect("plain ws connect should succeed");
 
     server
         .write_text_file("plain.md", "hello over plain ws")
         .await
         .unwrap();
     let target = client_dir.path().join("plain.md");
-    let synced = wait_until(Duration::from_secs(5), || {
-        let p = target.clone();
-        async move {
-            tokio::fs::read_to_string(&p)
-                .await
-                .ok()
-                .as_deref()
-                == Some("hello over plain ws")
-        }
-    })
-    .await;
+    let synced =
+        wait_until(Duration::from_secs(5), || {
+            let p = target.clone();
+            async move {
+                tokio::fs::read_to_string(&p).await.ok().as_deref() == Some("hello over plain ws")
+            }
+        })
+        .await;
     assert!(synced, "client never received the file over ws://");
 }
 

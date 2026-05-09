@@ -26,6 +26,8 @@ pub async fn run(cwd: PathBuf, args: DiffArgs) -> Result<()> {
         args.to.as_deref().unwrap_or("now")
     );
     println!("currently {} files in vault", files.len());
-    println!("(detailed pre/post-state diff is implemented at the doc level — TODO surface in CLI)");
+    println!(
+        "(detailed pre/post-state diff is implemented at the doc level — TODO surface in CLI)"
+    );
     Ok(())
 }

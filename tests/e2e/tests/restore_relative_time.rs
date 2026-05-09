@@ -55,7 +55,12 @@ async fn restore_at_accepts_hours_days_weeks() {
             .output()
             .await
             .unwrap();
-        assert!(out.status.success(), "restore-at {} failed: {:?}", input, out);
+        assert!(
+            out.status.success(),
+            "restore-at {} failed: {:?}",
+            input,
+            out
+        );
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let resolved = extract_resolved_ms(&stdout).unwrap();
         let expected = now - ms_offset;

@@ -63,10 +63,7 @@ async fn extending_text_extensions_opts_in_more_files() {
     let mut paths = vault.list_file_paths().await.unwrap();
     paths.retain(|p| p != "authorized_keys");
     paths.sort();
-    assert_eq!(
-        paths,
-        vec!["data.json".to_string(), "note.md".to_string()]
-    );
+    assert_eq!(paths, vec!["data.json".to_string(), "note.md".to_string()]);
     // .json should be ingested as text (its content should be readable as a
     // string, not stored as an attachment).
     let body = vault.read_text_file("data.json").await.unwrap();

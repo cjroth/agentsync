@@ -50,7 +50,11 @@ async fn ingest_directory(
     // nested dirs and the files inside them.
     let abs_root = binding.vault_path_to_fs_path(vault_path);
     let mut changed = false;
-    for entry in WalkDir::new(&abs_root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&abs_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let entry_abs = entry.path().to_path_buf();
         if entry.file_type().is_dir() {
             let p = match binding.fs_path_to_vault_dir_path(&entry_abs) {
@@ -171,11 +175,7 @@ async fn dispatch_fs_event(
                 if doc.find_directory_by_path(&vault_path)?.is_some() {
                     doc.delete_directory(&vault_path, true)?;
                     drop(doc);
-                    binding
-                        .materialized_dirs
-                        .lock()
-                        .await
-                        .remove(&vault_path);
+                    binding.materialized_dirs.lock().await.remove(&vault_path);
                     inner.doc_changed.notify_waiters();
                     let _ = inner.events.send(VaultEvent {
                         kind: VaultEventKind::FileChanged { path: vault_path },

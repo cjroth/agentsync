@@ -151,7 +151,7 @@ async fn concurrent_edits_converge() {
                 identity,
                 storage_path: dir.path().join(".agentsync"),
                 hub_pubkey: None,
-        name: None,
+                name: None,
             })
             .await
             .unwrap();

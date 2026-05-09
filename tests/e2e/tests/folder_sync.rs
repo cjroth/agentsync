@@ -43,10 +43,7 @@ async fn make_pair() -> (Vault, tempfile::TempDir, Vault, tempfile::TempDir) {
         .bind_directory(server_dir.path(), BindOptions::default())
         .await
         .unwrap();
-    let bound = server
-        .listen("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let bound = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let url = format!("wss://{}", bound);
 
     let client_identity = Identity::generate();
@@ -86,7 +83,12 @@ async fn empty_folder_create_propagates() {
     let target = client_dir.path().join("ideas");
     let appeared = wait_until(Duration::from_secs(5), || {
         let p = target.clone();
-        async move { tokio::fs::metadata(&p).await.map(|m| m.is_dir()).unwrap_or(false) }
+        async move {
+            tokio::fs::metadata(&p)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        }
     })
     .await;
     assert!(
@@ -110,7 +112,12 @@ async fn empty_folder_delete_propagates() {
     let client_path = client_dir.path().join("scratch");
     let appeared = wait_until(Duration::from_secs(5), || {
         let p = client_path.clone();
-        async move { tokio::fs::metadata(&p).await.map(|m| m.is_dir()).unwrap_or(false) }
+        async move {
+            tokio::fs::metadata(&p)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        }
     })
     .await;
     assert!(appeared, "client never saw scratch/");
@@ -172,7 +179,12 @@ async fn nested_empty_folder_create_propagates() {
     let target = client_dir.path().join("a/b/c");
     let appeared = wait_until(Duration::from_secs(5), || {
         let p = target.clone();
-        async move { tokio::fs::metadata(&p).await.map(|m| m.is_dir()).unwrap_or(false) }
+        async move {
+            tokio::fs::metadata(&p)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        }
     })
     .await;
     assert!(appeared, "client never observed nested folder a/b/c");
@@ -180,7 +192,13 @@ async fn nested_empty_folder_create_propagates() {
     // All three intermediate dirs should also exist on the client.
     for sub in ["a", "a/b"] {
         let p = client_dir.path().join(sub);
-        assert!(tokio::fs::metadata(&p).await.map(|m| m.is_dir()).unwrap_or(false),
-            "client missing intermediate {}", sub);
+        assert!(
+            tokio::fs::metadata(&p)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false),
+            "client missing intermediate {}",
+            sub
+        );
     }
 }

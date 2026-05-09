@@ -1,4 +1,4 @@
-use crate::auth::{build_transcript, random_nonce, NONCE_LEN};
+use crate::auth::{NONCE_LEN, build_transcript, random_nonce};
 use crate::error::{Error, Result};
 use crate::identity::{Identity, Pubkey};
 use crate::net::protocol::{Frame, HelloOp};
@@ -8,17 +8,17 @@ use crate::vault::SyncHandle;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use rustls_pki_types::ServerName;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
-use tokio_tungstenite::client_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::client_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{debug, info, warn};
 
 type WsStream = WebSocketStream<MaybeTlsClientStream>;
@@ -112,9 +112,9 @@ async fn probe_handshake(
 
     let (vault_id, hub_pubkey, vault_name, _) =
         run_handshake(&mut writer, &mut reader, identity, cert_fp).await?;
-    let ws = writer.reunite(reader).map_err(|e| {
-        Error::Network(format!("reunite ws after handshake: {}", e))
-    })?;
+    let ws = writer
+        .reunite(reader)
+        .map_err(|e| Error::Network(format!("reunite ws after handshake: {}", e)))?;
     Ok((vault_id, hub_pubkey, vault_name, ws))
 }
 
@@ -163,8 +163,7 @@ where
     // back to the hub identity signature alone, which a MITM cannot
     // forge — the signature covers `hub_identity_pubkey`, and the hub
     // identity is TOFU-pinned per vault.
-    let hub_disabled_binding = advertised_fp.len() == 32
-        && advertised_fp.iter().all(|b| *b == 0);
+    let hub_disabled_binding = advertised_fp.len() == 32 && advertised_fp.iter().all(|b| *b == 0);
     if !hub_disabled_binding && advertised_fp != expected_cert_fp.as_slice() {
         return Err(Error::Auth(format!(
             "tls cert fingerprint mismatch: advertised {} bytes, observed {}",
@@ -475,9 +474,7 @@ pub(crate) async fn handle_inbound(
     }
 }
 
-async fn read_one_frame<S>(
-    reader: &mut SplitStream<WebSocketStream<S>>,
-) -> Result<Frame>
+async fn read_one_frame<S>(reader: &mut SplitStream<WebSocketStream<S>>) -> Result<Frame>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {

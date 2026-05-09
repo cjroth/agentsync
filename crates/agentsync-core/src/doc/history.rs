@@ -1,6 +1,4 @@
-use crate::doc::{
-    get_int, get_object, get_text, map_keys, now_ms, Doc, FileKind, Label,
-};
+use crate::doc::{Doc, FileKind, Label, get_int, get_object, get_text, map_keys, now_ms};
 use crate::error::{Error, Result};
 use automerge::transaction::Transactable;
 use automerge::{ChangeHash, ObjType, ReadDoc, ScalarValue, Value};
@@ -12,7 +10,8 @@ impl Doc {
         let heads = self.inner.get_heads();
         let encoded = encode_heads(&heads);
         let entry = self.inner.put_object(&labels, label, ObjType::Map)?;
-        self.inner.put(&entry, "heads", ScalarValue::Bytes(encoded))?;
+        self.inner
+            .put(&entry, "heads", ScalarValue::Bytes(encoded))?;
         self.inner.put(&entry, "created_at", now_ms())?;
         self.commit_now();
         Ok(())
@@ -155,10 +154,7 @@ impl Doc {
             self.inner.delete(&meta, "deleted_at")?;
             match past_meta.kind {
                 FileKind::Text => {
-                    let target = past_file_contents
-                        .get(fid)
-                        .cloned()
-                        .unwrap_or_default();
+                    let target = past_file_contents.get(fid).cloned().unwrap_or_default();
                     let cur_text = get_text(&mut self.inner, &entry, "content")?;
                     match cur_text {
                         Some((id, current)) => {
@@ -168,9 +164,7 @@ impl Doc {
                             }
                         }
                         None => {
-                            let id = self
-                                .inner
-                                .put_object(&entry, "content", ObjType::Text)?;
+                            let id = self.inner.put_object(&entry, "content", ObjType::Text)?;
                             if !target.is_empty() {
                                 self.inner.splice_text(&id, 0, 0, &target)?;
                             }
@@ -227,8 +221,7 @@ impl Doc {
 
     pub fn heads_at_time(&mut self, target_ms: i64) -> Result<Vec<ChangeHash>> {
         let changes = self.inner.get_changes(&[]);
-        let mut included: std::collections::HashSet<ChangeHash> =
-            std::collections::HashSet::new();
+        let mut included: std::collections::HashSet<ChangeHash> = std::collections::HashSet::new();
         for c in &changes {
             if c.timestamp() <= target_ms {
                 included.insert(c.hash());

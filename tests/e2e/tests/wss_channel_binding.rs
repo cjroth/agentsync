@@ -5,8 +5,8 @@
 //! detected, because the fingerprint signed in the handshake transcript no
 //! longer matches the cert the client actually saw.
 
-use agentsync_core::tls::{client_config_accept_any, generate_self_signed, server_config};
 use agentsync_core::Identity;
+use agentsync_core::tls::{client_config_accept_any, generate_self_signed, server_config};
 use agentsync_e2e::E2EVault;
 use rustls_pki_types::ServerName;
 use std::net::SocketAddr;
@@ -46,9 +46,7 @@ async fn spawn_relay(real_hub_addr: SocketAddr) -> SocketAddr {
                     Err(_) => return,
                 };
                 let connector = TlsConnector::from(client_config_accept_any());
-                let server_name = ServerName::IpAddress(
-                    real_hub_addr.ip().into(),
-                );
+                let server_name = ServerName::IpAddress(real_hub_addr.ip().into());
                 let mut hub_tls = match connector.connect(server_name, hub_tcp).await {
                     Ok(s) => s,
                     Err(_) => return,
@@ -83,7 +81,9 @@ async fn active_mitm_relay_fails_handshake() {
     // valid auth credentials, the channel-binding check still rejects the
     // relay.
     let identity = Identity::generate();
-    v.authorize_peer("legitimate", &identity.pubkey()).await.unwrap();
+    v.authorize_peer("legitimate", &identity.pubkey())
+        .await
+        .unwrap();
 
     // Try to discover the vault_id through the relay.
     let res = tokio::time::timeout(

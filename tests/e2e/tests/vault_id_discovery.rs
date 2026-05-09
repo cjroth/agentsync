@@ -1,8 +1,8 @@
 //! Verifies vault_id discovery: a connecting peer can learn the hub's
 //! vault_id from the handshake — the hub's HelloHub frame carries it.
 
-use agentsync_core::{discover_vault_id, CreateOptions, Identity, Vault};
-use agentsync_e2e::{authorize_in_process, E2EVault};
+use agentsync_core::{CreateOptions, Identity, Vault, discover_vault_id};
+use agentsync_e2e::{E2EVault, authorize_in_process};
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::time::sleep;

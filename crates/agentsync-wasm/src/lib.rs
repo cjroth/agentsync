@@ -56,7 +56,12 @@ impl Identity {
     /// Export the 32-byte seed (file-backed identities only).
     #[wasm_bindgen]
     pub fn seed(&self) -> Result<Box<[u8]>, JsError> {
-        Ok(self.inner.seed().map_err(js_err)?.to_vec().into_boxed_slice())
+        Ok(self
+            .inner
+            .seed()
+            .map_err(js_err)?
+            .to_vec()
+            .into_boxed_slice())
     }
 
     /// Public key of this identity.
@@ -196,7 +201,10 @@ pub fn build_transcript(
     let peer_pk: [u8; 32] = peer_pubkey
         .try_into()
         .map_err(|_| JsError::new("peer_pubkey must be 32 bytes"))?;
-    Ok(core::build_transcript(&hub_n, &peer_n, tls_cert_fingerprint, &hub_pk, &peer_pk).into_boxed_slice())
+    Ok(
+        core::build_transcript(&hub_n, &peer_n, tls_cert_fingerprint, &hub_pk, &peer_pk)
+            .into_boxed_slice(),
+    )
 }
 
 // ---- Frame codec ----

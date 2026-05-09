@@ -16,7 +16,7 @@ pub mod mock_agent;
 pub use harness::{E2EVault, Peer};
 pub use mock_agent::MockAgent;
 
-use agentsync_core::{Pubkey, Vault, AUTHORIZED_KEYS_FILE};
+use agentsync_core::{AUTHORIZED_KEYS_FILE, Pubkey, Vault};
 
 /// Append a peer's pubkey to the in-memory `authorized_keys` of an in-process
 /// vault. Used by the in-process integration tests that don't go through the

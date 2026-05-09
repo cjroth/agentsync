@@ -1,10 +1,10 @@
 use crate::doc::Label;
 use crate::error::Result;
+use automerge::ChangeHash;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use base64::Engine;
-use automerge::ChangeHash;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotEntry {

@@ -23,9 +23,7 @@ async fn atomic_save_round_trip() {
         .await
         .unwrap();
 
-    v.rendezvous
-        .save_atomic("from-server.md", "world")
-        .unwrap();
+    v.rendezvous.save_atomic("from-server.md", "world").unwrap();
     v.peer(0)
         .wait_for_content("from-server.md", "world", T)
         .await
@@ -81,7 +79,10 @@ async fn rapid_truncate_saves_converge_on_final() {
     let _ = v.add_peer("alice").await.unwrap();
 
     v.peer(0).save_atomic("doc.md", "0").unwrap();
-    v.rendezvous.wait_for_content("doc.md", "0", T).await.unwrap();
+    v.rendezvous
+        .wait_for_content("doc.md", "0", T)
+        .await
+        .unwrap();
 
     // Hammer the file with five truncate-saves back to back.
     for i in 1..=5 {
@@ -128,7 +129,9 @@ async fn bidirectional_concurrent_writes_to_different_files() {
     let mut v = E2EVault::new().await.unwrap();
     let _ = v.add_peer("alice").await.unwrap();
 
-    v.peer(0).save_atomic("from-alice.md", "alice was here").unwrap();
+    v.peer(0)
+        .save_atomic("from-alice.md", "alice was here")
+        .unwrap();
     v.rendezvous
         .save_atomic("from-server.md", "server says hi")
         .unwrap();
@@ -181,13 +184,14 @@ async fn non_markdown_file_is_ignored() {
     let mut v = E2EVault::new().await.unwrap();
     let _ = v.add_peer("alice").await.unwrap();
 
-    v.peer(0)
-        .save_atomic("script.py", "print('nope')")
-        .unwrap();
+    v.peer(0).save_atomic("script.py", "print('nope')").unwrap();
     v.peer(0).save_atomic("note.md", "yes").unwrap();
 
     // The .md should sync; the .py should not exist on the rendezvous side.
-    v.rendezvous.wait_for_content("note.md", "yes", T).await.unwrap();
+    v.rendezvous
+        .wait_for_content("note.md", "yes", T)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         !v.rendezvous.exists("script.py"),

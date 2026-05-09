@@ -76,9 +76,15 @@ async fn restore_to_label_resets_content() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     vault.create_label("snap-v1").await.unwrap();
 
-    vault.write_text_file("a.md", "v2-much-changed").await.unwrap();
+    vault
+        .write_text_file("a.md", "v2-much-changed")
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(vault.read_text_file("a.md").await.unwrap(), "v2-much-changed");
+    assert_eq!(
+        vault.read_text_file("a.md").await.unwrap(),
+        "v2-much-changed"
+    );
 
     vault.restore_label("snap-v1").await.unwrap();
     assert_eq!(vault.read_text_file("a.md").await.unwrap(), "v1");

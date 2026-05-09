@@ -104,10 +104,7 @@ mod tests {
     #[test]
     fn missing_scheme_defaults_to_wss() {
         assert_eq!(normalize_rendezvous_url("my-hub"), "wss://my-hub");
-        assert_eq!(
-            normalize_rendezvous_url("my-hub:8443"),
-            "wss://my-hub:8443"
-        );
+        assert_eq!(normalize_rendezvous_url("my-hub:8443"), "wss://my-hub:8443");
         assert_eq!(
             normalize_rendezvous_url("hub.example.com"),
             "wss://hub.example.com"
@@ -126,10 +123,7 @@ mod tests {
             "ws://my-hub:8080"
         );
         // Explicit schemes still win.
-        assert_eq!(
-            normalize_with_scheme("wss://my-hub", true),
-            "wss://my-hub"
-        );
+        assert_eq!(normalize_with_scheme("wss://my-hub", true), "wss://my-hub");
     }
 
     #[test]
@@ -144,9 +138,6 @@ mod tests {
 
     #[test]
     fn whitespace_trimmed() {
-        assert_eq!(
-            normalize_rendezvous_url("  my-hub  "),
-            "wss://my-hub"
-        );
+        assert_eq!(normalize_rendezvous_url("  my-hub  "), "wss://my-hub");
     }
 }

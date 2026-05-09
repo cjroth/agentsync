@@ -59,7 +59,9 @@ async fn nested_syncignore_is_also_synced() {
     // Nested `.syncignore` files have their own rules anchored to their dir,
     // so they too must reach peers.
     let dir = tempdir().unwrap();
-    tokio::fs::create_dir_all(dir.path().join("sub")).await.unwrap();
+    tokio::fs::create_dir_all(dir.path().join("sub"))
+        .await
+        .unwrap();
     tokio::fs::write(dir.path().join("sub/.syncignore"), b"*.log\n")
         .await
         .unwrap();
@@ -127,7 +129,9 @@ async fn syncignore_directory_pattern_excludes_subtree() {
     tokio::fs::write(dir.path().join(".syncignore"), b"build/\n")
         .await
         .unwrap();
-    tokio::fs::create_dir_all(dir.path().join("build")).await.unwrap();
+    tokio::fs::create_dir_all(dir.path().join("build"))
+        .await
+        .unwrap();
     tokio::fs::write(dir.path().join("build/out.md"), b"x")
         .await
         .unwrap();
@@ -142,12 +146,9 @@ async fn syncignore_directory_pattern_excludes_subtree() {
 #[tokio::test]
 async fn syncignore_negation_keeps_specific_file() {
     let dir = tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join(".syncignore"),
-        b"*.log.md\n!keep.log.md\n",
-    )
-    .await
-    .unwrap();
+    tokio::fs::write(dir.path().join(".syncignore"), b"*.log.md\n!keep.log.md\n")
+        .await
+        .unwrap();
     tokio::fs::write(dir.path().join("debug.log.md"), b"a")
         .await
         .unwrap();
@@ -344,16 +345,15 @@ async fn deleting_syncignore_ingests_previously_excluded_file() {
     let mut paths = vault.list_file_paths().await.unwrap();
     paths.retain(|p| p != "authorized_keys" && !p.ends_with(".syncignore"));
     paths.sort();
-    assert_eq!(
-        paths,
-        vec!["hello.md".to_string(), "note.md".to_string()]
-    );
+    assert_eq!(paths, vec!["hello.md".to_string(), "note.md".to_string()]);
 }
 
 #[tokio::test]
 async fn nested_syncignore_only_applies_in_its_subtree() {
     let dir = tempdir().unwrap();
-    tokio::fs::create_dir_all(dir.path().join("sub")).await.unwrap();
+    tokio::fs::create_dir_all(dir.path().join("sub"))
+        .await
+        .unwrap();
     tokio::fs::write(dir.path().join("sub/.syncignore"), b"hidden.md\n")
         .await
         .unwrap();

@@ -57,19 +57,13 @@ impl AsyncWrite for MaybeTlsClientStream {
             MaybeTlsClientStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             MaybeTlsClientStream::Plain(s) => Pin::new(s).poll_flush(cx),
             MaybeTlsClientStream::Tls(s) => Pin::new(s).poll_flush(cx),
         }
     }
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             MaybeTlsClientStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
             MaybeTlsClientStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
@@ -101,19 +95,13 @@ impl AsyncWrite for MaybeTlsServerStream {
             MaybeTlsServerStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             MaybeTlsServerStream::Plain(s) => Pin::new(s).poll_flush(cx),
             MaybeTlsServerStream::Tls(s) => Pin::new(s).poll_flush(cx),
         }
     }
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             MaybeTlsServerStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
             MaybeTlsServerStream::Tls(s) => Pin::new(s).poll_shutdown(cx),

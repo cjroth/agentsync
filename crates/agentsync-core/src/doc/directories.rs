@@ -1,10 +1,10 @@
 use crate::doc::{
-    get_int, get_object, get_str, map_keys, new_id, now_ms, DirId, DirectoryMeta, Doc,
+    DirId, DirectoryMeta, Doc, get_int, get_object, get_str, map_keys, new_id, now_ms,
 };
 use crate::error::{Error, Result};
 use crate::path;
-use automerge::transaction::Transactable;
 use automerge::ObjType;
+use automerge::transaction::Transactable;
 
 impl Doc {
     pub fn find_directory_by_path(&mut self, path: &str) -> Result<Option<DirId>> {

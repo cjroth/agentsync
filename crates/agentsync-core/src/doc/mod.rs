@@ -16,14 +16,14 @@
 use crate::error::{Error, Result};
 use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
-    ActorId, AutoCommit, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
+    ActorId, AutoCommit, ChangeHash, ObjId, ObjType, ROOT, ReadDoc, ScalarValue, Value,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-pub mod files;
 pub mod directories;
+pub mod files;
 pub mod history;
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -149,10 +149,7 @@ impl Doc {
     pub(crate) fn map_obj(&mut self, key: &str) -> Result<ObjId> {
         match self.inner.get(ROOT, key)? {
             Some((Value::Object(_), id)) => Ok(id),
-            _ => Err(Error::Other(format!(
-                "schema missing root.{}",
-                key
-            ))),
+            _ => Err(Error::Other(format!("schema missing root.{}", key))),
         }
     }
 
@@ -253,7 +250,11 @@ pub(crate) fn get_int(doc: &mut impl ReadDoc, obj: &ObjId, key: &str) -> Result<
     }
 }
 
-pub(crate) fn get_text(doc: &mut impl ReadDoc, obj: &ObjId, key: &str) -> Result<Option<(ObjId, String)>> {
+pub(crate) fn get_text(
+    doc: &mut impl ReadDoc,
+    obj: &ObjId,
+    key: &str,
+) -> Result<Option<(ObjId, String)>> {
     match doc.get(obj, key)? {
         Some((Value::Object(ObjType::Text), id)) => {
             let text = doc.text(&id)?;

@@ -1,4 +1,4 @@
-use crate::auth::{build_transcript, random_nonce, NONCE_LEN};
+use crate::auth::{NONCE_LEN, build_transcript, random_nonce};
 use crate::error::{Error, Result};
 use crate::identity::{Identity, Pubkey};
 use crate::net::client::handle_inbound;
@@ -13,12 +13,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
 
 type AcceptedStream = MaybeTlsServerStream;
@@ -236,11 +236,7 @@ fn log_authorized_diff(prev: &HashMap<Pubkey, String>, current: &[AuthorizedPeer
 }
 
 fn label_or_unlabeled(s: &str) -> &str {
-    if s.is_empty() {
-        "(unlabeled)"
-    } else {
-        s
-    }
+    if s.is_empty() { "(unlabeled)" } else { s }
 }
 
 async fn handle_peer(
@@ -278,10 +274,7 @@ async fn handle_peer(
             op,
         } => (peer_identity_pubkey, peer_nonce, op),
         Frame::Error { message } => {
-            return Err(Error::Protocol(format!(
-                "peer reported error: {}",
-                message
-            )));
+            return Err(Error::Protocol(format!("peer reported error: {}", message)));
         }
         _ => return Err(Error::Protocol("expected HelloPeer".into())),
     };
@@ -328,10 +321,7 @@ async fn handle_peer(
     let peer_sig = match frame {
         Frame::ProofPeer { sig } => sig,
         Frame::Error { message } => {
-            return Err(Error::Protocol(format!(
-                "peer reported error: {}",
-                message
-            )));
+            return Err(Error::Protocol(format!("peer reported error: {}", message)));
         }
         _ => return Err(Error::Protocol("expected ProofPeer".into())),
     };

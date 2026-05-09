@@ -14,7 +14,7 @@
 
 use crate::error::{Error, Result};
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH};
+use ed25519_dalek::{SECRET_KEY_LENGTH, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -96,8 +96,7 @@ impl Identity {
     /// the seed. Errors for agent-backed identities.
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
         let seed = self.seed()?;
-        let seed_b64 =
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(seed);
+        let seed_b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(seed);
         let body = format!("agentsync-identity-v1 {}\n", seed_b64);
         write_with_mode(path, body.as_bytes(), 0o600)?;
         let pub_path = pubkey_sidecar(path);
@@ -108,9 +107,10 @@ impl Identity {
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         let s = std::str::from_utf8(&bytes).map_err(|_| Error::InvalidUtf8)?;
-        let line = s.lines().next().ok_or_else(|| {
-            Error::Auth(format!("empty identity file at {}", path.display()))
-        })?;
+        let line = s
+            .lines()
+            .next()
+            .ok_or_else(|| Error::Auth(format!("empty identity file at {}", path.display())))?;
         let rest = line
             .strip_prefix("agentsync-identity-v1 ")
             .ok_or_else(|| {
@@ -343,11 +343,7 @@ async fn agent_sign(socket: &Path, pubkey: &Pubkey, message: &[u8]) -> Result<[u
     {
         use tokio::net::UnixStream;
         let mut stream = UnixStream::connect(socket).await.map_err(|e| {
-            Error::Auth(format!(
-                "ssh-agent connect to {}: {}",
-                socket.display(),
-                e
-            ))
+            Error::Auth(format!("ssh-agent connect to {}: {}", socket.display(), e))
         })?;
 
         // Sanity: make sure the agent actually holds this key. Catches the
@@ -406,8 +402,7 @@ async fn agent_sign(socket: &Path, pubkey: &Pubkey, message: &[u8]) -> Result<[u
                 Ok(out)
             }
             SSH_AGENT_FAILURE => Err(Error::Auth(
-                "ssh-agent refused to sign (user cancelled, key locked, or wrong key)"
-                    .into(),
+                "ssh-agent refused to sign (user cancelled, key locked, or wrong key)".into(),
             )),
             other => Err(Error::Auth(format!(
                 "ssh-agent returned unexpected response type {}",
@@ -431,11 +426,7 @@ pub async fn agent_list_identities_at(socket: &Path) -> Result<Vec<Pubkey>> {
     {
         use tokio::net::UnixStream;
         let mut stream = UnixStream::connect(socket).await.map_err(|e| {
-            Error::Auth(format!(
-                "ssh-agent connect to {}: {}",
-                socket.display(),
-                e
-            ))
+            Error::Auth(format!("ssh-agent connect to {}: {}", socket.display(), e))
         })?;
         agent_list_identities(&mut stream).await
     }
@@ -461,7 +452,9 @@ async fn agent_list_identities(stream: &mut tokio::net::UnixStream) -> Result<Ve
     }
     let mut cursor = 1usize;
     if resp.len() < cursor + 4 {
-        return Err(Error::Auth("ssh-agent identities response truncated".into()));
+        return Err(Error::Auth(
+            "ssh-agent identities response truncated".into(),
+        ));
     }
     let n = u32::from_be_bytes([
         resp[cursor],

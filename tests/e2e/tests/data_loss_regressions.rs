@@ -29,11 +29,7 @@ async fn slow_truncate_save_does_not_propagate_empty() {
     // Save with a 350ms gap between truncate and write — well outside the
     // 150ms debounce window. This is the failure mode the user reported.
     v.peer(0)
-        .save_truncate_with_gap(
-            "yo.md",
-            "version-2 (final)",
-            Duration::from_millis(350),
-        )
+        .save_truncate_with_gap("yo.md", "version-2 (final)", Duration::from_millis(350))
         .unwrap();
 
     // Both peers must converge on the final content. Crucially, content must
@@ -53,7 +49,11 @@ async fn slow_truncate_save_does_not_propagate_empty() {
     let alice = v.peer(0).read("yo.md").unwrap();
     let server = v.rendezvous.read("yo.md").unwrap();
     assert_eq!(alice, "version-2 (final)", "alice flipped to: {:?}", alice);
-    assert_eq!(server, "version-2 (final)", "server flipped to: {:?}", server);
+    assert_eq!(
+        server, "version-2 (final)",
+        "server flipped to: {:?}",
+        server
+    );
 
     v.shutdown().await;
 }
@@ -93,11 +93,7 @@ async fn slow_truncate_never_empties_peer_disk() {
 
     // Slow truncate-write on alice.
     v.peer(0)
-        .save_truncate_with_gap(
-            "yo.md",
-            "ended-with-content",
-            Duration::from_millis(350),
-        )
+        .save_truncate_with_gap("yo.md", "ended-with-content", Duration::from_millis(350))
         .unwrap();
 
     let saw_empty = watcher.await.unwrap();
@@ -188,7 +184,10 @@ async fn locally_written_edit_reaches_the_doc() {
     let _ = v.add_peer("alice").await.unwrap();
 
     v.peer(0).save_atomic("yo.md", "BASE").unwrap();
-    v.rendezvous.wait_for_content("yo.md", "BASE", T).await.unwrap();
+    v.rendezvous
+        .wait_for_content("yo.md", "BASE", T)
+        .await
+        .unwrap();
 
     // Server saves first; alice saves 30ms later. With 150ms debouncing,
     // server's sync message lands at alice's doc *before* alice's own

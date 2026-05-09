@@ -226,8 +226,7 @@ async fn clone_uses_local_identity() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let _ = child.kill().await;
 
-    let cfg = std::fs::read_to_string(target_path.join(".agentsync").join("config.toml"))
-        .unwrap();
+    let cfg = std::fs::read_to_string(target_path.join(".agentsync").join("config.toml")).unwrap();
     assert!(
         cfg.contains(&format!("id = \"{}\"", v.vault_id)),
         "clone did not record vault_id; config.toml:\n{}",

@@ -2,7 +2,7 @@ use crate::cli::RestoreAtArgs;
 use crate::commands::require_config;
 use crate::config;
 use agentsync_core::{OpenOptions, Vault};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -87,7 +87,10 @@ mod tests {
 
     #[test]
     fn parses_epoch_ms_passthrough() {
-        assert_eq!(parse_timestamp("1700000000000", 0).unwrap(), 1_700_000_000_000);
+        assert_eq!(
+            parse_timestamp("1700000000000", 0).unwrap(),
+            1_700_000_000_000
+        );
     }
 
     #[test]
