@@ -14,6 +14,7 @@
 //! Files and directories are keyed by stable UUIDs; paths are mutable fields.
 
 use crate::error::{Error, Result};
+use automerge::sync::{self as amsync, SyncDoc};
 use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
     ActorId, AutoCommit, ChangeHash, ObjId, ObjType, ROOT, ReadDoc, ScalarValue, Value,
@@ -169,6 +170,27 @@ impl Doc {
     pub fn merge(&mut self, other: &mut Doc) -> Result<bool> {
         let before = self.inner.get_heads();
         self.inner.merge(&mut other.inner)?;
+        let after = self.inner.get_heads();
+        Ok(before != after)
+    }
+
+    /// Generate the next outbound sync message for `state`. Returns `None`
+    /// when no message is currently needed (peer is up to date).
+    pub fn generate_sync_message(&mut self, state: &mut amsync::State) -> Option<Vec<u8>> {
+        let sd = self.inner.sync();
+        sd.generate_sync_message(state).map(|m| m.encode())
+    }
+
+    /// Apply an inbound sync message. Returns true if heads moved (i.e.
+    /// new changes were applied).
+    pub fn receive_sync_message(&mut self, state: &mut amsync::State, msg: &[u8]) -> Result<bool> {
+        let parsed = amsync::Message::decode(msg)
+            .map_err(|e| Error::Other(format!("decode sync msg: {}", e)))?;
+        let before = self.inner.get_heads();
+        let mut sd = self.inner.sync();
+        sd.receive_sync_message(state, parsed)
+            .map_err(|e| Error::Other(format!("receive sync msg: {}", e)))?;
+        drop(sd);
         let after = self.inner.get_heads();
         Ok(before != after)
     }

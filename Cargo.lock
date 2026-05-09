@@ -95,6 +95,8 @@ name = "agentsync-wasm"
 version = "0.1.0"
 dependencies = [
  "agentsync-core",
+ "automerge",
+ "base64",
  "console_error_panic_hook",
  "getrandom 0.2.17",
  "getrandom 0.4.2",

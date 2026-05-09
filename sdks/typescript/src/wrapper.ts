@@ -3,7 +3,7 @@
 // this wrapper exists so we have one place to typecheck the API and add
 // thin convenience layers later if needed.
 
-import type { AuthorizedPeer, Frame } from './types.js';
+import type { AuthorizedPeer, DirectoryMeta, FileMeta, Frame, Label } from './types.js';
 
 // The wasm-pack output declares these as concrete classes. We restate the
 // minimum slice we need so consumers don't have to depend on whichever
@@ -12,6 +12,7 @@ interface WasmModule {
   Identity: typeof IdentityClass;
   Pubkey: typeof PubkeyClass;
   Doc: typeof DocClass;
+  SyncState: typeof SyncStateClass;
   parseAuthorizedKeys(body: string): AuthorizedPeer[];
   renderAuthorizedKeys(entries: AuthorizedPeer[]): string;
   randomNonce(): Uint8Array;
@@ -49,24 +50,45 @@ declare class PubkeyClass {
   free(): void;
 }
 
+declare class SyncStateClass {
+  constructor();
+  static decode(bytes: Uint8Array): SyncStateClass;
+  encode(): Uint8Array;
+  free(): void;
+}
+
 declare class DocClass {
   constructor(vaultId: string);
   static load(bytes: Uint8Array): DocClass;
   save(): Uint8Array;
   saveIncremental(): Uint8Array;
   vaultId(): string;
+  heads(): Uint8Array[];
   merge(other: DocClass): boolean;
+  generateSyncMessage(state: SyncStateClass): Uint8Array | undefined;
+  receiveSyncMessage(state: SyncStateClass, bytes: Uint8Array): boolean;
   writeTextFile(path: string, content: string): string;
   readFile(path: string): string;
   fileExists(path: string): boolean;
   deleteFile(path: string): void;
-  listFiles(): unknown[];
+  renameFile(from: string, to: string): void;
+  writeAttachment(path: string, hash: string, size: number): string;
+  listFiles(): FileMeta[];
+  createDirectory(path: string): string;
+  deleteDirectory(path: string, recursive: boolean): void;
+  listDirectories(): DirectoryMeta[];
+  createLabel(name: string): void;
+  deleteLabel(name: string): void;
+  listLabels(): Label[];
+  restoreToLabel(name: string): void;
+  restoreToTime(targetMs: number): void;
   free(): void;
 }
 
 export type Identity = IdentityClass;
 export type Pubkey = PubkeyClass;
 export type Doc = DocClass;
+export type SyncState = SyncStateClass;
 
 export function wrap(mod: unknown): WasmModule {
   // The wasm-pack glue is structurally a WasmModule; cast and re-export.

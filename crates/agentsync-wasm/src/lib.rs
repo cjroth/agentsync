@@ -1,14 +1,19 @@
 //! WebAssembly bindings for `agentsync-core`.
 //!
-//! Mirrors the wasm-safe slice of the Rust SDK: identities and signing,
-//! Automerge document primitives, the protocol Frame codec,
-//! `authorized_keys` parsing, and handshake helpers. Networking and on-disk
-//! storage stay in `agentsync-core`'s native build — wasm callers wire those
-//! up using browser/Node WebSockets and IndexedDB / fs themselves.
+//! Exposes everything a JavaScript-side high-level Vault implementation
+//! needs: identities & signing, the protocol Frame codec, the Automerge
+//! Doc + sync state machine, label/restore APIs, authorized_keys parsing,
+//! and handshake helpers.
+//!
+//! Networking, storage, and filesystem watching live in the JS layer (so
+//! the same wasm runs in browsers, Node, Bun, Electron, Tauri, IDE
+//! plugins, etc.) — see `sdks/typescript/src/vault.ts` for the high-level
+//! API that orchestrates these primitives into a working sync client.
 
 #![allow(clippy::new_without_default)]
 
 use agentsync_core as core;
+use core::doc::FileMeta;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -224,12 +229,47 @@ pub fn encode_frame(value: JsValue) -> Result<Box<[u8]>, JsError> {
     Ok(frame.encode().map_err(js_err)?.into_boxed_slice())
 }
 
+// ---- Sync state ----
+
+/// Per-peer sync state for the Automerge incremental sync protocol. One
+/// `SyncState` per remote peer; encode/decode for persistence so reconnects
+/// don't replay the entire history.
+#[wasm_bindgen]
+pub struct SyncState {
+    inner: automerge::sync::State,
+}
+
+#[wasm_bindgen]
+impl SyncState {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: automerge::sync::State::new(),
+        }
+    }
+
+    /// Serialize the state for storage. Pair with [`SyncState::decode`].
+    #[wasm_bindgen]
+    pub fn encode(&self) -> Box<[u8]> {
+        self.inner.encode().into_boxed_slice()
+    }
+
+    /// Restore a state from previously-encoded bytes.
+    #[wasm_bindgen]
+    pub fn decode(bytes: &[u8]) -> Result<SyncState, JsError> {
+        Ok(Self {
+            inner: automerge::sync::State::decode(bytes).map_err(js_err)?,
+        })
+    }
+}
+
 // ---- Doc / CRDT ----
 
 /// Wraps an Automerge-backed agentsync document. Use [`new`] to create a
 /// fresh vault doc, [`load`] to restore from saved bytes, and [`save`] to
 /// serialize. Mutators apply Automerge changes locally; merge with a remote
-/// peer's bytes via [`merge`].
+/// peer's bytes via [`merge`] (full-doc) or via the sync-state pair
+/// `generate_sync_message` / `receive_sync_message` (incremental).
 #[wasm_bindgen]
 pub struct Doc {
     inner: core::Doc,
@@ -270,10 +310,45 @@ impl Doc {
         self.inner.vault_id().map_err(js_err)
     }
 
+    /// Current document heads (each 32 bytes). Useful for label snapshots
+    /// and incremental sync state tracking.
+    #[wasm_bindgen]
+    pub fn heads(&mut self) -> Vec<js_sys::Uint8Array> {
+        self.inner
+            .heads()
+            .iter()
+            .map(|h| {
+                let bytes: [u8; 32] = h.0;
+                js_sys::Uint8Array::from(&bytes[..])
+            })
+            .collect()
+    }
+
     /// Merge in changes from `other`. Returns true if the local doc changed.
     #[wasm_bindgen]
     pub fn merge(&mut self, other: &mut Doc) -> Result<bool, JsError> {
         self.inner.merge(&mut other.inner).map_err(js_err)
+    }
+
+    /// Generate the next outbound sync message for `state`. Returns
+    /// `undefined` (mapped from `None`) when no message is needed.
+    #[wasm_bindgen(js_name = generateSyncMessage)]
+    pub fn generate_sync_message(&mut self, state: &mut SyncState) -> Option<Box<[u8]>> {
+        self.inner
+            .generate_sync_message(&mut state.inner)
+            .map(|m| m.into_boxed_slice())
+    }
+
+    /// Apply an inbound sync message. Returns true if heads moved.
+    #[wasm_bindgen(js_name = receiveSyncMessage)]
+    pub fn receive_sync_message(
+        &mut self,
+        state: &mut SyncState,
+        bytes: &[u8],
+    ) -> Result<bool, JsError> {
+        self.inner
+            .receive_sync_message(&mut state.inner, bytes)
+            .map_err(js_err)
     }
 
     /// Write a UTF-8 text file at `path`. Returns the stable file id.
@@ -298,12 +373,119 @@ impl Doc {
         self.inner.delete_file(path).map_err(js_err)
     }
 
+    /// Rename a file. The stable file id is preserved.
+    #[wasm_bindgen(js_name = renameFile)]
+    pub fn rename_file(&mut self, from: &str, to: &str) -> Result<(), JsError> {
+        self.inner.rename_file(from, to).map_err(js_err)
+    }
+
+    /// Write a binary attachment under `path`, content-addressed by `hash`
+    /// (the JS side computes the SHA-256). Returns the file id.
+    #[wasm_bindgen(js_name = writeAttachment)]
+    pub fn write_attachment(
+        &mut self,
+        path: &str,
+        hash: &str,
+        size: i64,
+    ) -> Result<String, JsError> {
+        self.inner
+            .write_attachment(path, hash, size)
+            .map_err(js_err)
+    }
+
     /// List all current files. Returns an array of `FileMeta` objects.
     #[wasm_bindgen(js_name = listFiles)]
     pub fn list_files(&mut self) -> Result<JsValue, JsError> {
         let files = self.inner.list_files().map_err(js_err)?;
-        serde_wasm_bindgen::to_value(&files).map_err(js_err)
+        files_to_js(&files)
     }
+
+    /// Create a directory at `path`. Returns the directory id.
+    #[wasm_bindgen(js_name = createDirectory)]
+    pub fn create_directory(&mut self, path: &str) -> Result<String, JsError> {
+        self.inner.create_directory(path).map_err(js_err)
+    }
+
+    /// Delete a directory.
+    #[wasm_bindgen(js_name = deleteDirectory)]
+    pub fn delete_directory(&mut self, path: &str, recursive: bool) -> Result<(), JsError> {
+        self.inner.delete_directory(path, recursive).map_err(js_err)
+    }
+
+    /// List directories.
+    #[wasm_bindgen(js_name = listDirectories)]
+    pub fn list_directories(&mut self) -> Result<JsValue, JsError> {
+        let dirs = self.inner.list_directories().map_err(js_err)?;
+        serde_wasm_bindgen::to_value(&dirs).map_err(js_err)
+    }
+
+    // ---- History / labels / restore ----
+
+    /// Create a named snapshot of the current heads.
+    #[wasm_bindgen(js_name = createLabel)]
+    pub fn create_label(&mut self, name: &str) -> Result<(), JsError> {
+        self.inner.create_label(name).map_err(js_err)
+    }
+
+    /// Delete a label.
+    #[wasm_bindgen(js_name = deleteLabel)]
+    pub fn delete_label(&mut self, name: &str) -> Result<(), JsError> {
+        self.inner.delete_label(name).map_err(js_err)
+    }
+
+    /// List all labels with their heads + creation timestamps.
+    #[wasm_bindgen(js_name = listLabels)]
+    pub fn list_labels(&mut self) -> Result<JsValue, JsError> {
+        let labels = self.inner.list_labels().map_err(js_err)?;
+        let out: Vec<_> = labels
+            .into_iter()
+            .map(|l| LabelJson {
+                name: l.name,
+                heads_b64: encode_heads_b64(&l.heads),
+                created_at_ms: l.created_at,
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&out).map_err(js_err)
+    }
+
+    /// Restore the doc to the snapshot named `label`. Additive: produces
+    /// new forward-going changes that recreate the past state, preserving
+    /// any concurrent changes from other peers.
+    #[wasm_bindgen(js_name = restoreToLabel)]
+    pub fn restore_to_label(&mut self, label: &str) -> Result<(), JsError> {
+        let heads = self.inner.get_label_heads(label).map_err(js_err)?;
+        self.inner.restore_to_heads(&heads).map_err(js_err)
+    }
+
+    /// Restore the doc to the state at `target_ms` (Unix milliseconds).
+    /// Convenience wrapper over `heads_at_time` + `restore_to_heads`.
+    /// Takes `f64` so JS callers can pass `Date.now()` directly without
+    /// having to convert to BigInt; agentsync timestamps fit comfortably
+    /// in IEEE-754 precision.
+    #[wasm_bindgen(js_name = restoreToTime)]
+    pub fn restore_to_time(&mut self, target_ms: f64) -> Result<(), JsError> {
+        self.inner.restore_to_time(target_ms as i64).map_err(js_err)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LabelJson {
+    name: String,
+    heads_b64: String,
+    created_at_ms: i64,
+}
+
+fn encode_heads_b64(heads: &[automerge::ChangeHash]) -> String {
+    use base64::Engine;
+    let mut bytes = Vec::with_capacity(heads.len() * 32);
+    for h in heads {
+        bytes.extend_from_slice(&h.0);
+    }
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+}
+
+fn files_to_js(files: &[FileMeta]) -> Result<JsValue, JsError> {
+    serde_wasm_bindgen::to_value(files).map_err(js_err)
 }
 
 // ---- Helpers ----
