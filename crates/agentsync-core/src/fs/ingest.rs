@@ -1,13 +1,20 @@
 //! Filesystem-side ingestion: convert disk state into Automerge changes.
 
+use crate::constants::AUTHORIZED_KEYS_FILE;
 use crate::doc::content_hash;
 use crate::error::Result;
 use crate::fs::adapter::FsEvent;
 use crate::fs::binding::Binding;
+use crate::fs::sync_ignore::SYNC_IGNORE_FILENAME;
 use crate::vault::{VaultEvent, VaultEventKind, VaultInner};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
 use walkdir::WalkDir;
+
+fn is_syncignore(path: &Path) -> bool {
+    path.file_name().and_then(|s| s.to_str()) == Some(SYNC_IGNORE_FILENAME)
+}
 
 pub(crate) async fn initial_scan(inner: &Arc<VaultInner>, binding: &Arc<Binding>) -> Result<()> {
     let root = binding.root().to_path_buf();
@@ -82,6 +89,34 @@ pub(crate) async fn handle_fs_event(
     binding: &Arc<Binding>,
     event: FsEvent,
 ) -> Result<()> {
+    // Rebuild ignore matchers on any `.syncignore` change so mid-session edits
+    // (or remote-pushed updates the materializer just wrote) take effect for
+    // subsequent ingests in this same handler call. Done before the per-event
+    // dispatch so the rebuilt patterns apply if the same event also targets
+    // a file we'd otherwise consider for ingest.
+    let touches_syncignore = match &event {
+        FsEvent::Touched(p) | FsEvent::Removed(p) => is_syncignore(p),
+        FsEvent::Renamed { from, to } => is_syncignore(from) || is_syncignore(to),
+    };
+    if touches_syncignore {
+        binding.rebuild_sync_ignore();
+    }
+    let dispatch = dispatch_fs_event(inner, binding, event).await;
+    if touches_syncignore {
+        // A relaxed or removed rule may have un-excluded files that already
+        // exist on disk. Walk the tree to ingest them — `ingest_file` is
+        // idempotent for already-synced content, so this is a no-op when the
+        // change only added rules.
+        initial_scan(inner, binding).await?;
+    }
+    dispatch
+}
+
+async fn dispatch_fs_event(
+    inner: &Arc<VaultInner>,
+    binding: &Arc<Binding>,
+    event: FsEvent,
+) -> Result<()> {
     match event {
         FsEvent::Touched(abs) => {
             // Resolve disk type up-front: a single notify event might be for
@@ -110,6 +145,14 @@ pub(crate) async fn handle_fs_event(
             // Directory deletes cascade so a recursive rm is captured even
             // when child events haven't been processed yet.
             if let Some(vault_path) = binding.fs_path_to_vault_path(&abs) {
+                if vault_path == AUTHORIZED_KEYS_FILE {
+                    // Refuse to propagate a deletion of authorized_keys.
+                    // Without it the auth check returns an empty list and
+                    // every peer is locked out of the vault — including the
+                    // one that just did `rm -rf`. The materializer rewrites
+                    // the file from the doc on its next pass.
+                    return Ok(());
+                }
                 let mut doc = inner.doc.lock().await;
                 if doc.file_exists(&vault_path) {
                     doc.delete_file(&vault_path)?;
@@ -153,6 +196,11 @@ pub(crate) async fn handle_fs_event(
                     }
                 }
                 (Some(f), None) => {
+                    if f == AUTHORIZED_KEYS_FILE {
+                        // Same protection as FsEvent::Removed: a rename out
+                        // of the vault is a delete from the doc's view.
+                        return Ok(());
+                    }
                     let mut doc = inner.doc.lock().await;
                     if doc.file_exists(&f) {
                         doc.delete_file(&f)?;

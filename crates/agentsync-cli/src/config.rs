@@ -41,8 +41,6 @@ pub struct IdentitySection {
 pub struct SyncSection {
     #[serde(default = "default_extensions")]
     pub extensions: Vec<String>,
-    #[serde(default = "default_exclude")]
-    pub exclude: Vec<String>,
     #[serde(default)]
     pub include: Vec<String>,
     #[serde(default = "default_attachment_max")]
@@ -55,14 +53,6 @@ pub struct SyncSection {
 
 fn default_extensions() -> Vec<String> {
     vec!["md".into(), "markdown".into()]
-}
-fn default_exclude() -> Vec<String> {
-    vec![
-        "**/.git/**".into(),
-        "**/node_modules/**".into(),
-        "**/.DS_Store".into(),
-        "**/.agentsync/**".into(),
-    ]
 }
 fn default_attachment_max() -> u64 {
     10 * 1024 * 1024
@@ -78,7 +68,6 @@ impl Default for SyncSection {
     fn default() -> Self {
         Self {
             extensions: default_extensions(),
-            exclude: default_exclude(),
             include: Vec::new(),
             attachment_max_bytes: default_attachment_max(),
             text_file_max_bytes: default_text_max(),
@@ -105,7 +94,6 @@ impl SyncSection {
             .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
             .collect();
         agentsync_core::BindOptions {
-            exclude_patterns: self.exclude.clone(),
             include_patterns: include,
             text_extensions,
             attachment_max_bytes: self.attachment_max_bytes,

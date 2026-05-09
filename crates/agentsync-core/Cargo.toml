@@ -37,6 +37,7 @@ notify.workspace = true
 rand.workspace = true
 async-trait.workspace = true
 walkdir.workspace = true
+ignore.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true

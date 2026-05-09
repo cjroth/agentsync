@@ -107,9 +107,11 @@ pub struct InitArgs {
     /// `~/.ssh/id_ed25519`).
     #[arg(long)]
     pub identity: Option<PathBuf>,
-    /// Skip creating / updating `.gitignore` and `.agentsignore`. By default
-    /// `init` ensures both contain `.agentsync/` so the per-vault state
-    /// directory isn't accidentally committed or re-synced.
+    /// Skip creating / updating `.gitignore`, `.agentsignore`, and
+    /// `.syncignore`. By default `init` ensures `.gitignore` and
+    /// `.agentsignore` contain `.agentsync/` so the per-vault state directory
+    /// isn't accidentally committed or re-synced, and writes a starter
+    /// `.syncignore` (gitignore syntax) for excluding files from sync.
     #[arg(long)]
     pub no_ignore_files: bool,
 }

@@ -1,11 +1,12 @@
 //! `agentsync init` adds `.agentsync/` to `.gitignore` and `.agentsignore`
-//! by default. Existing files are appended to (no duplicate lines).
-//! `--no-ignore-files` opts out.
+//! and seeds a `.syncignore` (gitignore-syntax) by default. Existing files
+//! are appended to (no duplicate lines); `.syncignore` is left alone if it
+//! already exists. `--no-ignore-files` opts out of all three.
 
 use std::time::Duration;
 
 #[tokio::test]
-async fn init_creates_gitignore_and_agentsignore_by_default() {
+async fn init_creates_ignore_files_by_default() {
     let dir = tempfile::TempDir::new().unwrap();
     let home = tempfile::TempDir::new().unwrap();
     let binary = locate_binary();
@@ -21,11 +22,14 @@ async fn init_creates_gitignore_and_agentsignore_by_default() {
 
     let git = dir.path().join(".gitignore");
     let agent = dir.path().join(".agentsignore");
+    let sync = dir.path().join(".syncignore");
     assert!(git.exists(), ".gitignore not created");
     assert!(agent.exists(), ".agentsignore not created");
+    assert!(sync.exists(), ".syncignore not created");
 
     let g = std::fs::read_to_string(&git).unwrap();
     let a = std::fs::read_to_string(&agent).unwrap();
+    let s = std::fs::read_to_string(&sync).unwrap();
     assert!(
         g.lines().any(|l| l.trim() == ".agentsync/"),
         ".gitignore missing `.agentsync/` line:\n{}",
@@ -36,6 +40,39 @@ async fn init_creates_gitignore_and_agentsignore_by_default() {
         ".agentsignore missing `.agentsync/` line:\n{}",
         a
     );
+    // `.syncignore` body is opinionated — assert the defaults we care about.
+    assert!(
+        s.lines().any(|l| l.trim() == "node_modules/"),
+        ".syncignore missing `node_modules/`:\n{}",
+        s
+    );
+    assert!(
+        s.lines().any(|l| l.trim() == ".DS_Store"),
+        ".syncignore missing `.DS_Store`:\n{}",
+        s
+    );
+}
+
+#[tokio::test]
+async fn init_leaves_existing_syncignore_alone() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = tempfile::TempDir::new().unwrap();
+    let binary = locate_binary();
+
+    let custom = "# my own rules\nbuild/\n!build/keep.md\n";
+    std::fs::write(dir.path().join(".syncignore"), custom).unwrap();
+
+    let out = tokio::process::Command::new(&binary)
+        .arg("init")
+        .env("HOME", home.path())
+        .current_dir(dir.path())
+        .output()
+        .await
+        .unwrap();
+    assert!(out.status.success());
+
+    let s = std::fs::read_to_string(dir.path().join(".syncignore")).unwrap();
+    assert_eq!(s, custom, "init should not modify an existing .syncignore");
 }
 
 #[tokio::test]
@@ -122,6 +159,7 @@ async fn no_ignore_files_flag_skips_creation() {
 
     assert!(!dir.path().join(".gitignore").exists());
     assert!(!dir.path().join(".agentsignore").exists());
+    assert!(!dir.path().join(".syncignore").exists());
 }
 
 fn locate_binary() -> std::path::PathBuf {

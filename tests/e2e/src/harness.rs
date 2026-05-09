@@ -583,12 +583,6 @@ path = ".agentsync/identity"
 
 [sync]
 extensions = ["md", "markdown"]
-exclude = [
-    "**/.git/**",
-    "**/node_modules/**",
-    "**/.DS_Store",
-    "**/.agentsync/**",
-]
 include = []
 attachment_max_bytes = 10485760
 text_file_max_bytes = 1048576

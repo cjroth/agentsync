@@ -54,12 +54,17 @@ pub async fn run(cwd: PathBuf, args: WatchArgs) -> Result<()> {
     };
     let mut vault = Vault::open(opts).await?;
 
+    let bind_opts = cfg.sync.to_bind_options();
+    let _binding = vault.bind_directory(&path, bind_opts).await?;
+
+    // Must run after bind_directory: initial_scan ingests the on-disk
+    // authorized_keys into the doc, which would otherwise clobber a merge
+    // done before bind. On a restart of a hosted hub (Fly/Railway) the file
+    // already exists on the volume, so the wrong order silently drops the
+    // intended peer.
     if let Some(raw) = args.authorized_keys.as_deref() {
         merge_authorized_keys(&vault, raw).await?;
     }
-
-    let bind_opts = cfg.sync.to_bind_options();
-    let _binding = vault.bind_directory(&path, bind_opts).await?;
 
     if let Some(addr) = &args.listen {
         // Resolve `--listen` (no value) to the default for the chosen

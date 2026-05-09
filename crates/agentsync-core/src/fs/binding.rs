@@ -1,16 +1,21 @@
 use crate::constants::AUTHORIZED_KEYS_FILE;
 use crate::fs::adapter::{FilesystemAdapter, Watcher};
 use crate::fs::suppression::DirtySet;
+use crate::fs::sync_ignore::{SyncIgnoreSet, SYNC_IGNORE_FILENAME};
 use crate::path as path_norm;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
 /// Configuration for binding the vault to a local directory.
+///
+/// User-tunable exclude patterns are *not* part of this struct — they live in
+/// `.syncignore` files under the vault root, parsed at bind time using
+/// gitignore syntax. Two paths are unconditionally excluded
+/// (`.git/`, `.agentsync/`); see `Binding::path_allowed`.
 #[derive(Debug, Clone)]
 pub struct BindOptions {
-    pub exclude_patterns: Vec<String>,
     pub include_patterns: Vec<String>,
     /// Extensions (without the dot) that should be ingested as Automerge text.
     /// A file whose extension is not in this list and is not matched by
@@ -44,7 +49,6 @@ impl BindOptions {
             .collect();
         let include = exts.iter().map(|e| format!("**/*.{}", e)).collect();
         Self {
-            exclude_patterns: default_exclude_patterns(),
             include_patterns: include,
             text_extensions: exts,
             attachment_max_bytes: 10 * 1024 * 1024,
@@ -59,13 +63,21 @@ impl Default for BindOptions {
     }
 }
 
-fn default_exclude_patterns() -> Vec<String> {
-    vec![
-        "**/.git/**".into(),
-        "**/node_modules/**".into(),
-        "**/.DS_Store".into(),
-        "**/.agentsync/**".into(),
-    ]
+/// Top-level path segments we never sync. Hardcoded — moving these into a
+/// `.syncignore` would let a user accidentally remove them and corrupt their
+/// vault (`.agentsync/` recursive sync) or repo (`.git/`).
+const ALWAYS_EXCLUDED_TOP_SEGMENTS: &[&str] = &[".agentsync", ".git"];
+
+fn always_excluded(path: &str) -> bool {
+    let first = path.split('/').next().unwrap_or("");
+    ALWAYS_EXCLUDED_TOP_SEGMENTS.iter().any(|s| *s == first)
+}
+
+/// True when the last path segment is `.syncignore`. Matches both the root
+/// file and any nested `<dir>/.syncignore`, since gitignore semantics allow
+/// per-directory rule files and we want all of them to sync.
+fn is_syncignore_path(path: &str) -> bool {
+    path.rsplit('/').next() == Some(SYNC_IGNORE_FILENAME)
 }
 
 /// Per-binding state shared between the inbound fs loop and the outbound
@@ -73,6 +85,11 @@ fn default_exclude_patterns() -> Vec<String> {
 pub struct Binding {
     root: PathBuf,
     opts: BindOptions,
+    /// Wrapped in `RwLock` so the watcher loop can rebuild it when a
+    /// `.syncignore` file is created, modified, or removed mid-session.
+    /// Without that, the matchers built at bind time go stale and edits to
+    /// `.syncignore` silently fail to take effect.
+    sync_ignore: RwLock<SyncIgnoreSet>,
     adapter: Arc<dyn FilesystemAdapter>,
     pub(crate) dirty: Arc<Mutex<DirtySet>>,
     /// path-in-doc -> content hash currently materialized on disk
@@ -95,9 +112,12 @@ impl Binding {
         opts: BindOptions,
         adapter: Arc<dyn FilesystemAdapter>,
     ) -> Self {
+        let root = root.as_ref().to_path_buf();
+        let sync_ignore = RwLock::new(SyncIgnoreSet::from_vault_root(&root));
         Self {
-            root: root.as_ref().to_path_buf(),
+            root,
             opts,
+            sync_ignore,
             adapter,
             dirty: Arc::new(Mutex::new(DirtySet::new())),
             materialized: Arc::new(Mutex::new(HashMap::new())),
@@ -164,16 +184,36 @@ impl Binding {
         p
     }
 
+    /// Re-walk the vault root for `.syncignore` files and replace the cached
+    /// matcher set. Called by the ingest loop when it sees a `.syncignore`
+    /// touch/remove/rename event so live edits take effect without rebinding.
+    pub(crate) fn rebuild_sync_ignore(&self) {
+        let fresh = SyncIgnoreSet::from_vault_root(&self.root);
+        if let Ok(mut guard) = self.sync_ignore.write() {
+            *guard = fresh;
+        }
+    }
+
     fn path_allowed(&self, path: &str) -> bool {
-        if !self.opts.exclude_patterns.is_empty()
-            && glob_match_any(&self.opts.exclude_patterns, path)
-        {
+        if always_excluded(path) {
             return false;
         }
-        // The hub gates connections on this file, so it must sync even when
-        // the user's include filter (markdown-only by default) would skip it.
-        if path == AUTHORIZED_KEYS_FILE {
+        // Files the engine itself depends on. Special-cased *before* the
+        // `.syncignore` and include-filter checks so a user can't accidentally
+        // break the system by listing them in `.syncignore`, and so they sync
+        // under the markdown-only default. `authorized_keys` gates hub
+        // connections; `.syncignore` is the shared exclusion policy and only
+        // works if every peer agrees on its contents.
+        if path == AUTHORIZED_KEYS_FILE || is_syncignore_path(path) {
             return true;
+        }
+        if self
+            .sync_ignore
+            .read()
+            .map(|s| s.matches(path, false))
+            .unwrap_or(false)
+        {
+            return false;
         }
         if !self.opts.include_patterns.is_empty()
             && !glob_match_any(&self.opts.include_patterns, path)
@@ -183,20 +223,25 @@ impl Binding {
         true
     }
 
-    /// Whether a directory path is allowed. Only the exclude list applies —
+    /// Whether a directory path is allowed. Only exclusion rules apply —
     /// the include list is meant for filtering files by extension and would
     /// reject every directory if applied here.
     pub(crate) fn dir_path_allowed(&self, path: &str) -> bool {
-        if self.opts.exclude_patterns.is_empty() {
-            return true;
+        if always_excluded(path) {
+            return false;
         }
-        !glob_match_any(&self.opts.exclude_patterns, path)
+        !self
+            .sync_ignore
+            .read()
+            .map(|s| s.matches(path, true))
+            .unwrap_or(false)
     }
 
     pub(crate) fn is_text_extension(&self, path: &str) -> bool {
-        // Pair with the special-case in `path_allowed`: the auth file has no
-        // extension but its content is text and must round-trip exactly.
-        if path == AUTHORIZED_KEYS_FILE {
+        // Pair with the special-case in `path_allowed`: these files have no
+        // recognised extension but their content is text and must round-trip
+        // exactly.
+        if path == AUTHORIZED_KEYS_FILE || is_syncignore_path(path) {
             return true;
         }
         match Path::new(path).extension().and_then(|s| s.to_str()) {
