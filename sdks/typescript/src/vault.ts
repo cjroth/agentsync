@@ -82,31 +82,41 @@ export class Vault {
   private doc: Doc;
   private identity: Identity;
   private vaultId: string;
+  /** True when we generated/loaded the identity ourselves and should free
+   * it on close. False when the caller passed one in — they own it. */
+  private ownsIdentity: boolean;
   private connection: ConnectionState | null = null;
   private reconnectAbort: AbortController | null = null;
   private listeners = new Set<(e: VaultEvent) => void>();
   private closed = false;
 
   /** Create a brand-new vault on the supplied storage. Pass `vaultId` to
-   * adopt an existing remote vault (the joining-an-existing-hub case). */
+   * adopt an existing remote vault (the joining-an-existing-hub case);
+   * in that mode no authorized_keys is seeded — the joining peer learns
+   * everything from sync. */
   static async create(wasm: WasmBindings, options: CreateOptions): Promise<Vault> {
+    const ownsIdentity = !options.identity;
     const identity = options.identity ?? (await loadOrCreateIdentity(wasm, options.storage));
+    const joiningExisting = !!options.vaultId;
     const vaultId = options.vaultId ?? generateVaultId();
     const doc = new wasm.Doc(vaultId);
-    // Seed authorized_keys with the creator's pubkey. Mirrors
-    // `Vault::create` in the Rust core (constants::AUTHORIZED_KEYS_FILE
-    // is "authorized_keys" at the vault root).
-    const pk = identity.pubkey();
-    const sshLine = `${pk.toSshString()} creator\n`;
-    doc.writeTextFile('authorized_keys', sshLine);
-    pk.free();
+    if (!joiningExisting) {
+      // Fresh vault: seed authorized_keys with the creator's pubkey so
+      // the creator can connect to their own listener immediately.
+      // Mirrors `Vault::create` in the Rust core.
+      const pk = identity.pubkey();
+      const sshLine = `${pk.toSshString()} creator\n`;
+      doc.writeTextFile('authorized_keys', sshLine);
+      pk.free();
+    }
     const bytes = doc.save();
     await options.storage.saveDoc(bytes);
-    return new Vault(wasm, options, doc, identity, vaultId);
+    return new Vault(wasm, options, doc, identity, vaultId, ownsIdentity);
   }
 
   /** Open an existing vault from storage; errors if no doc exists. */
   static async open(wasm: WasmBindings, options: OpenOptions): Promise<Vault> {
+    const ownsIdentity = !options.identity;
     const identity = options.identity ?? (await loadOrCreateIdentity(wasm, options.storage));
     const bytes = await options.storage.loadDoc();
     if (!bytes) {
@@ -114,7 +124,7 @@ export class Vault {
     }
     const doc = wasm.Doc.load(bytes);
     const vaultId = doc.vaultId();
-    return new Vault(wasm, options, doc, identity, vaultId);
+    return new Vault(wasm, options, doc, identity, vaultId, ownsIdentity);
   }
 
   private constructor(
@@ -123,12 +133,14 @@ export class Vault {
     doc: Doc,
     identity: Identity,
     vaultId: string,
+    ownsIdentity: boolean,
   ) {
     this.wasm = wasm;
     this.opts = opts;
     this.doc = doc;
     this.identity = identity;
     this.vaultId = vaultId;
+    this.ownsIdentity = ownsIdentity;
   }
 
   // ---- Read-only accessors ----
@@ -143,11 +155,12 @@ export class Vault {
     return this.connection?.ready ?? false;
   }
 
-  // ---- File operations (delegate to Doc, persist after) ----
+  // ---- File operations (delegate to Doc, persist + push sync after) ----
 
   async writeTextFile(path: string, content: string): Promise<string> {
     const id = this.doc.writeTextFile(path, content);
     await this.flush();
+    await this.kickSyncLoop();
     return id;
   }
 
@@ -162,11 +175,13 @@ export class Vault {
   async deleteFile(path: string): Promise<void> {
     this.doc.deleteFile(path);
     await this.flush();
+    await this.kickSyncLoop();
   }
 
   async renameFile(from: string, to: string): Promise<void> {
     this.doc.renameFile(from, to);
     await this.flush();
+    await this.kickSyncLoop();
   }
 
   listFiles() {
@@ -176,12 +191,14 @@ export class Vault {
   async createDirectory(path: string): Promise<string> {
     const id = this.doc.createDirectory(path);
     await this.flush();
+    await this.kickSyncLoop();
     return id;
   }
 
   async deleteDirectory(path: string, recursive = false): Promise<void> {
     this.doc.deleteDirectory(path, recursive);
     await this.flush();
+    await this.kickSyncLoop();
   }
 
   listDirectories() {
@@ -204,12 +221,12 @@ export class Vault {
   async restoreToLabel(name: string): Promise<void> {
     this.doc.restoreToLabel(name);
     await this.flush();
-    this.kickSyncLoop();
+    await this.kickSyncLoop();
   }
   async restoreToTime(targetMs: number): Promise<void> {
     this.doc.restoreToTime(targetMs);
     await this.flush();
-    this.kickSyncLoop();
+    await this.kickSyncLoop();
   }
 
   // ---- Events ----
@@ -338,9 +355,11 @@ export class Vault {
     try {
       this.doc.free();
     } catch {}
-    try {
-      this.identity.free();
-    } catch {}
+    if (this.ownsIdentity) {
+      try {
+        this.identity.free();
+      } catch {}
+    }
     await this.opts.storage.close();
   }
 
@@ -476,10 +495,13 @@ export class Vault {
     await conn.send(bytes);
   }
 
-  /** Wake the sync loop after a local doc mutation. No-op when offline. */
-  private kickSyncLoop(): void {
+  /** Wake the sync loop after a local doc mutation. No-op when offline.
+   * Awaitable so callers can ensure the change is on the wire before they
+   * return. (The sync loop also pumps on every inbound; this kick is what
+   * delivers a local-only change while no inbound is in flight.) */
+  private async kickSyncLoop(): Promise<void> {
     if (this.connection?.ready) {
-      void this.pumpOutbound(this.connection);
+      await this.pumpOutbound(this.connection);
     }
   }
 

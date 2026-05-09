@@ -31,23 +31,24 @@ let port = 0;
 let vaultId = '';
 let peerIdentity: ReturnType<typeof Identity.generate>;
 
-function waitFor<T>(check: () => T | undefined, timeoutMs = 10_000): Promise<T> {
+async function waitFor<T>(
+  check: () => T | undefined | Promise<T | undefined>,
+  timeoutMs = 10_000,
+): Promise<T> {
   const start = Date.now();
-  return new Promise((resolve, reject) => {
-    const tick = () => {
-      const v = check();
-      if (v !== undefined) {
-        resolve(v);
-        return;
-      }
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error(`timeout after ${timeoutMs}ms`));
-        return;
-      }
-      setTimeout(tick, 50);
-    };
-    tick();
-  });
+  while (true) {
+    let v: T | undefined;
+    try {
+      v = await check();
+    } catch {
+      v = undefined;
+    }
+    if (v !== undefined) return v;
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`timeout after ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 before(async () => {
@@ -85,7 +86,12 @@ before(async () => {
   // vault root once it's running.
   hub = spawn(AGENTSYNC, ['--listen', '127.0.0.1:0'], {
     cwd: vaultDir,
-    env: { ...process.env, HOME: tmp, AGENTSYNC_HOME: tmp },
+    env: {
+      ...process.env,
+      HOME: tmp,
+      AGENTSYNC_HOME: tmp,
+      AGENTSYNC_LOG: 'error',
+    },
   });
   const stdout: string[] = [];
   hub.stdout.on('data', (b: Buffer) => {
@@ -128,46 +134,140 @@ after(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
 });
 
+async function makeTsVault() {
+  const storage = memoryStorage();
+  const v = await Vault.create({
+    storage,
+    identity: peerIdentity,
+    vaultId,
+    rendezvousUrl: `wss://127.0.0.1:${port}`,
+    transport: nodeWsTransport(WebSocket as unknown as never),
+  });
+  return { v, storage };
+}
+
+/** Wait until `v.subscribe` emits an event whose `kind` is in `wanted`. */
+function waitForEvent(v: Awaited<ReturnType<typeof makeTsVault>>['v'], wanted: string[]) {
+  return new Promise<void>((resolve, reject) => {
+    const off = v.subscribe((e) => {
+      if (wanted.includes(e.kind)) {
+        off();
+        resolve();
+      }
+      if (e.kind === 'error') {
+        off();
+        reject(new Error(e.message));
+      }
+    });
+  });
+}
+
 describe('TypeScript Vault ↔ Rust hub', () => {
   test('completes the 4-message handshake and emits connected', { timeout: 30_000 }, async () => {
-    const storage = memoryStorage();
-    const v = await Vault.create({
-      storage,
-      identity: peerIdentity,
-      vaultId,
-      rendezvousUrl: `wss://127.0.0.1:${port}`,
-      transport: nodeWsTransport(WebSocket as unknown as never),
-    });
-
+    const { v } = await makeTsVault();
     const events: string[] = [];
     const unsub = v.subscribe((e) => events.push(e.kind));
-
-    // Race connect() against a "connected event seen" promise; the test
-    // succeeds as soon as the handshake completes.
-    const connectedSeen = new Promise<void>((resolve, reject) => {
-      const off = v.subscribe((e) => {
-        if (e.kind === 'connected') {
-          off();
-          resolve();
-        }
-        if (e.kind === 'error') {
-          off();
-          reject(new Error(e.message));
-        }
-      });
-    });
-
-    const connectPromise = v.connect().catch(() => {
-      /* swallow — connection close after disconnect is expected */
-    });
-
-    await connectedSeen;
+    const connected = waitForEvent(v, ['connected']);
+    const connectPromise = v.connect().catch(() => {});
+    await connected;
     assert.ok(events.includes('connecting'));
     assert.ok(events.includes('connected'));
-
     unsub();
     await v.disconnect();
     await connectPromise;
+    await v.close();
+  });
+
+  test('TS write propagates to hub disk', { timeout: 30_000 }, async () => {
+    const { v } = await makeTsVault();
+    const connected = waitForEvent(v, ['connected']);
+    const connectPromise = v.connect().catch(() => {});
+    await connected;
+    // Wait briefly for the initial sync round-trip to settle so the TS
+    // doc and hub doc share heads before we add a new local change.
+    await new Promise((r) => setTimeout(r, 800));
+
+    await v.writeTextFile('hello-from-ts.md', '# from ts\n');
+
+    const target = join(vaultDir, 'hello-from-ts.md');
+    const content = await waitFor(async () => {
+      try {
+        const c = await readFile(target, 'utf8');
+        return c === '# from ts\n' ? c : undefined;
+      } catch {
+        return undefined;
+      }
+    }, 15_000);
+    assert.equal(content, '# from ts\n');
+
+    await v.disconnect();
+    await connectPromise;
+    await v.close();
+  });
+
+  test('hub write propagates to TS Vault', { timeout: 30_000 }, async () => {
+    const { v } = await makeTsVault();
+    const connected = waitForEvent(v, ['connected']);
+    const connectPromise = v.connect().catch(() => {});
+    await connected;
+
+    // Drop a file into the hub's vault directory; the materializer
+    // ingest loop picks it up and the sync engine forwards it to peers.
+    await writeFile(join(vaultDir, 'hello-from-hub.md'), '# from hub\n');
+
+    // Poll the TS Vault until the file shows up.
+    const text = await waitFor(() => {
+      try {
+        return v.readTextFile('hello-from-hub.md');
+      } catch {
+        return undefined;
+      }
+    }, 15_000);
+    assert.equal(text, '# from hub\n');
+
+    await v.disconnect();
+    await connectPromise;
+    await v.close();
+  });
+
+  test('reconnect after hub restart', { timeout: 60_000 }, async () => {
+    const { v } = await makeTsVault();
+    const connected1 = waitForEvent(v, ['connected']);
+    const reconnectAbort = v.connectWithReconnect({ initialBackoffMs: 200 });
+    // Don't await — connectWithReconnect runs forever.
+    reconnectAbort.catch(() => {});
+    await connected1;
+
+    // Kill the hub and re-spawn on the SAME port so the TS Vault's
+    // backoff loop reconnects to the new instance.
+    hub!.kill('SIGTERM');
+    await new Promise<void>((r) => hub!.once('exit', () => r()));
+
+    const newHub = spawn(AGENTSYNC, ['--listen', `127.0.0.1:${port}`], {
+      cwd: vaultDir,
+      env: { ...process.env, HOME: tmp, AGENTSYNC_HOME: tmp },
+    });
+    newHub.stdout.on('data', () => {});
+    newHub.stderr.on('data', () => {});
+    hub = newHub;
+
+    // Subscribe AFTER killing so we only catch the re-connect event.
+    const reconnected = new Promise<void>((resolve, reject) => {
+      const t0 = Date.now();
+      const tick = setInterval(() => {
+        if (v.isConnected()) {
+          clearInterval(tick);
+          resolve();
+        } else if (Date.now() - t0 > 30_000) {
+          clearInterval(tick);
+          reject(new Error('reconnect timeout'));
+        }
+      }, 100);
+    });
+    await reconnected;
+    assert.equal(v.isConnected(), true);
+
+    await v.disconnect();
     await v.close();
   });
 });

@@ -13,6 +13,7 @@ interface WsLike {
   binaryType: string;
   send(data: Uint8Array, cb?: (err?: Error) => void): void;
   close(code?: number, reason?: string): void;
+  terminate(): void;
   on(event: 'open', cb: () => void): void;
   on(event: 'message', cb: (data: Buffer | ArrayBuffer | Buffer[]) => void): void;
   on(event: 'close', cb: () => void): void;
@@ -76,7 +77,22 @@ export function nodeWsTransport(WS: WsCtor): TransportAdapter {
           return channelBindingBytes;
         },
         async close() {
+          // Initiate the WebSocket close handshake. If the peer doesn't
+          // respond within 500ms, terminate the underlying TCP socket so
+          // the connection actually goes away (and runSyncLoop exits).
           ws.close();
+          await new Promise<void>((res) => {
+            const t = setTimeout(() => {
+              try {
+                ws.terminate();
+              } catch {}
+              res();
+            }, 500);
+            ws.on('close', () => {
+              clearTimeout(t);
+              res();
+            });
+          });
         },
       };
     },
