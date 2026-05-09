@@ -97,6 +97,10 @@ name = "init_ignore_files"
 path = "tests/init_ignore_files.rs"
 
 [[test]]
+name = "syncignore_filter"
+path = "tests/syncignore_filter.rs"
+
+[[test]]
 name = "completions"
 path = "tests/completions.rs"
 

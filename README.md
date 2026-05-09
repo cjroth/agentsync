@@ -127,7 +127,7 @@ Requires Rust 1.89+.
 
 | Command | Description |
 | --- | --- |
-| `agentsync init [--name NAME]` | Initialize a vault. Auto-generates a `name` from the directory basename (override with `--name`). Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` (skip with `--no-ignore-files`). |
+| `agentsync init [--name NAME]` | Initialize a vault. Auto-generates a `name` from the directory basename (override with `--name`). Generates an ed25519 identity (default `~/.agentsync/id_ed25519`) and seeds `authorized_keys` with it. Also adds `.agentsync/` to `.gitignore` and `.agentsignore` and writes a starter `.syncignore` (gitignore-syntax exclude list for the sync engine) — skip all three with `--no-ignore-files`. |
 | `agentsync watch [--authorized-keys KEYS]` | Watch and sync the vault at `--cwd` (default when no subcommand given). `--authorized-keys` (or the `AGENTSYNC_AUTHORIZED_KEYS` env var) merges extra `ssh-ed25519` lines into the synced `authorized_keys` on startup — handy for bootstrapping a server from a Fly.io / Railway secret. |
 | `agentsync clone <url> [dir] [--vault-id ID] [--accept-hub-key PK] [--no-tls]` | Clone an existing vault. The local directory defaults to the remote vault's `name` (read from the handshake); pass `dir` to override. `--vault-id` is discovered via the handshake if omitted; `--accept-hub-key` skips the interactive TOFU prompt. URLs without a scheme are taken as `wss://` (or `ws://` with `--no-tls`). Port-less URLs use the scheme default (443 for wss, 80 for ws); include `:<port>` only when reaching a hub bound to something other than 443. |
 | `agentsync status` | Print connection state, vault id, and local pubkey. |
@@ -236,6 +236,7 @@ my-vault/
 ├── README.md
 ├── .gitignore                   ← seeded by `init` to ignore .agentsync/
 ├── .agentsignore                ← same, for agentsync's own ingest filter
+├── .syncignore                  ← gitignore-syntax exclude list (per-vault sync engine)
 ├── .agentsync/                  ← per-vault state, managed by the CLI
 │   ├── config.toml              ← vault id, name, rendezvous url, identity path, hub_pubkey
 │   ├── doc.bin                  ← saved Automerge document (full history)
@@ -277,6 +278,40 @@ fly secrets set AGENTSYNC_AUTHORIZED_KEYS="$(cat ~/.agentsync/id_ed25519.pub)"
 fly logs | grep identity_pub
 agentsync clone wss://your-app.fly.dev --accept-hub-key "ssh-ed25519 ..."
 ```
+
+## Disaster recovery
+
+### I deleted my local clone and now files are missing on the hub
+
+If you `rm -rf` a clone while `agentsync watch` (or an active `agentsync
+clone`) is still running, the deletions of your *data files* propagate to
+every peer through the live sync session — there's no separate confirmation
+step. `authorized_keys` is the one exception: a delete event for it is
+dropped at the FS-event layer, so you can't accidentally lock everyone out
+by wiping the directory. To recover the data files:
+
+1. Re-clone the vault (`agentsync clone <url>`). You'll get the deleted
+   state — empty or near-empty.
+2. Rewind the doc to before the deletion: `agentsync restore-at 5m` (or
+   whatever offset / epoch-ms target you need). `restore-at` is *additive*:
+   it appends new forward-going changes that re-create the files, rather
+   than rewriting history, so the recovery itself syncs back to the hub
+   cleanly.
+3. Run `agentsync watch` to push the un-delete changes up. The hub and any
+   other peers will converge on the restored state.
+
+To avoid the situation entirely, **stop the watcher before deleting a
+clone** — Ctrl-C the running `agentsync watch` / `agentsync clone`, then
+`rm -rf`.
+
+### My hub is on Fly / Railway and the operator key got removed
+
+If the operator's bootstrap pubkey ends up missing from `authorized_keys`
+(e.g. someone hand-edited the file or the file predates the delete guard),
+restart the hub container. On boot, `agentsync watch` re-merges
+`AGENTSYNC_AUTHORIZED_KEYS` into the synced doc — so as long as the secret
+is still set, the bootstrap key comes back. Then re-clone locally and (if
+needed) `agentsync restore-at` to roll back any other lost state.
 
 ## Testing
 

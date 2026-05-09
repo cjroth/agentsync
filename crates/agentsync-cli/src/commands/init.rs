@@ -64,6 +64,7 @@ pub async fn run(cwd: PathBuf, args: InitArgs) -> Result<()> {
     if !args.no_ignore_files {
         ensure_ignore_entry(&path.join(".gitignore"), ".agentsync/")?;
         ensure_ignore_entry(&path.join(".agentsignore"), ".agentsync/")?;
+        seed_syncignore(&path.join(".syncignore"))?;
     }
 
     println!("Initialized agentsync vault.");
@@ -113,6 +114,29 @@ fn ensure_ignore_entry(path: &Path, entry: &str) -> Result<()> {
     body.push_str(entry);
     body.push('\n');
     std::fs::write(path, body)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Default `.syncignore` body. Uses gitignore syntax — full negation,
+/// directory-only patterns, and anchoring all work. `.agentsync/` and `.git/`
+/// are excluded unconditionally by the engine and don't need to live here.
+const DEFAULT_SYNCIGNORE: &str = "\
+# .syncignore — patterns excluded from agentsync's sync engine.
+# Same syntax as .gitignore. Add anything you don't want propagated to peers.
+
+node_modules/
+.DS_Store
+";
+
+/// Drop a starter `.syncignore` at `path` if none exists. Existing files are
+/// left untouched — users may have customised them, and gitignore semantics
+/// makes blind appending risky (a later `*` could shadow earlier negations).
+fn seed_syncignore(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(path, DEFAULT_SYNCIGNORE)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }

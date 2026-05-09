@@ -28,6 +28,7 @@ async-trait.workspace = true
 url.workspace = true
 bytes.workspace = true
 walkdir.workspace = true
+ignore.workspace = true
 serde_bytes = "0.11"
 ed25519-dalek.workspace = true
 rand_core.workspace = true
