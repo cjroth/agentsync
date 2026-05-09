@@ -19,6 +19,8 @@ pub mod peers_md;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fs;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod host;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
