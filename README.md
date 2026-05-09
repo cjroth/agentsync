@@ -37,7 +37,7 @@ By default only `.md` and `.markdown` files sync; edit `[sync] extensions` in
 
 * Dead-simple `agentsync` CLI that syncs between devices
 * The CLI wraps a Rust SDK ([`agentsync-core`](./crates/agentsync-core)) that can be imported to any Rust app
-* TypeScript / WebAssembly SDK at [`@agentsync/sdk`](./sdks/typescript) — same primitives as the Rust SDK, runs in Node, Bun, and the browser
+* TypeScript / WebAssembly SDK at [`@agentsync/sdk`](./sdks/typescript) with a high-level `Vault` API that mirrors the Rust SDK and runs in Node, Bun, browsers, Electron, Tauri, and IDE extensions
 * Built on Automerge which uses CRDTs to prevent merge conflicts
 * Tag snapshots to easily go back to any point in time
 * Per-device ed25519 identities; authorization via a synced `authorized_keys` file (SSH-style)
@@ -134,27 +134,43 @@ Requires Rust 1.89+. To build the TypeScript SDK locally:
 cd sdks/typescript
 bun install
 bun run build       # wasm-pack + tsc
-bun test test/unit  # 21 unit tests
-bun run test:e2e    # spins up an `agentsync` hub and sync-tests against it
+bun test            # 41 unit tests
+bun run test:e2e    # 5 e2e tests against a real `agentsync` hub
 ```
 
 ## TypeScript / WASM SDK
 
+The SDK ships a high-level `Vault` API that mirrors `agentsync-core::Vault` —
+connect, sync, watch, restore-to-time, label snapshots, file CRUD — plus all
+the low-level primitives (Identity, Pubkey, Doc, SyncState, frame codec,
+handshake helpers).
+
 ```ts
-import { Identity, Doc, decodeFrame } from '@agentsync/sdk';
+import { Vault, Identity, nodeFsStorage, nodeWsTransport } from '@agentsync/sdk';
+import WebSocket from 'ws';
 
-const id = Identity.generate();
-console.log(id.pubkey().toSshString());
+const vault = await Vault.create({
+  storage: nodeFsStorage('./my-vault/.agentsync'),
+  vaultId: '6f1f1aa9-...',
+  rendezvousUrl: 'wss://hub.example.com',
+  transport: nodeWsTransport(WebSocket),
+});
 
-const doc = new Doc('vault-1');
-doc.writeTextFile('notes/hello.md', '# hello\n');
-const bytes = doc.save();          // ship over the wire
-const reloaded = Doc.load(bytes);  // on the other peer
+await vault.writeTextFile('notes/hello.md', '# hi\n');
+await vault.connectWithReconnect();   // exponential backoff, runs forever
+
+vault.subscribe((e) => console.log(e.kind));
+await vault.createLabel('before-cleanup');
+await vault.restoreToLabel('before-cleanup');
 ```
 
-For browsers / Vite / Rollup: `import { ... } from '@agentsync/sdk/web'`.
-The raw `.wasm` is also exposed at `@agentsync/sdk/wasm` for custom
-loaders.
+For browsers / Vite / Rollup: `import { ... } from '@agentsync/sdk/web'`. The
+browser bundle uses `globalThis.WebSocket` and OPFS by default. The raw `.wasm`
+is also exposed at `@agentsync/sdk/wasm` for custom loaders.
+
+See the [SDK README](./sdks/typescript/README.md) for the full API surface,
+adapter list, and runtime targets (Node, Bun, browser, Electron, Tauri,
+Obsidian, VS Code/Cursor).
 
 ## Releases
 
