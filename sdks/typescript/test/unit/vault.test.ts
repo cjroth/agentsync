@@ -3,12 +3,7 @@
 // Uses `MemoryStorage` so no fs / network involved.
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import {
-  type CreateOptions,
-  MemoryStorage,
-  Vault,
-  memoryStorage,
-} from '../../src/index.js';
+import { type CreateOptions, MemoryStorage, Vault, memoryStorage } from '../../src/index.js';
 
 async function freshVault(opts?: Partial<CreateOptions>) {
   const storage = memoryStorage();
@@ -44,7 +39,7 @@ describe('Vault.create / Vault.open', () => {
 
   it('seeds authorized_keys with the creator pubkey', async () => {
     const { v } = await freshVault();
-    const body = await v.readTextFile('peers/authorized_keys');
+    const body = await v.readTextFile('authorized_keys');
     expect(body).toMatch(/^ssh-ed25519 [A-Za-z0-9+/]+ creator\n$/);
     await v.close();
   });

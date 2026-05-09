@@ -87,17 +87,18 @@ export class Vault {
   private listeners = new Set<(e: VaultEvent) => void>();
   private closed = false;
 
-  /** Create a brand-new vault on the supplied storage. */
+  /** Create a brand-new vault on the supplied storage. Pass `vaultId` to
+   * adopt an existing remote vault (the joining-an-existing-hub case). */
   static async create(wasm: WasmBindings, options: CreateOptions): Promise<Vault> {
     const identity = options.identity ?? (await loadOrCreateIdentity(wasm, options.storage));
-    const vaultId = generateVaultId();
+    const vaultId = options.vaultId ?? generateVaultId();
     const doc = new wasm.Doc(vaultId);
-    // Seed authorized_keys with the creator's pubkey. The Rust side does
-    // this on `Vault::create` too; mirroring it keeps round-trips between
-    // TS and Rust hosts working.
+    // Seed authorized_keys with the creator's pubkey. Mirrors
+    // `Vault::create` in the Rust core (constants::AUTHORIZED_KEYS_FILE
+    // is "authorized_keys" at the vault root).
     const pk = identity.pubkey();
     const sshLine = `${pk.toSshString()} creator\n`;
-    doc.writeTextFile('peers/authorized_keys', sshLine);
+    doc.writeTextFile('authorized_keys', sshLine);
     pk.free();
     const bytes = doc.save();
     await options.storage.saveDoc(bytes);

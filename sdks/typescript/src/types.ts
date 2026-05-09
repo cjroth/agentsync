@@ -138,6 +138,9 @@ export interface VaultOptions {
   storage: StorageAdapter;
   /** Optional identity (generated if absent). */
   identity?: import('./wrapper.js').Identity;
+  /** Existing vault id to adopt. When omitted on `Vault.create`, a fresh
+   * UUID is minted. Use this when joining an existing remote vault. */
+  vaultId?: string;
   /** Hub URL, e.g. `wss://hub.example.com`. Required for sync; optional for offline use. */
   rendezvousUrl?: string;
   /** Pin the hub's identity pubkey (TOFU). */
