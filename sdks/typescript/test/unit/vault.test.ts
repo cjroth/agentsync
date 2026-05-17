@@ -3,7 +3,39 @@
 // Uses `MemoryStorage` so no fs / network involved.
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { type CreateOptions, MemoryStorage, Vault, memoryStorage } from '../../src/index.js';
+import {
+  type CreateOptions,
+  type Frame,
+  Identity,
+  MemoryStorage,
+  type TransportAdapter,
+  Vault,
+  encodeFrame,
+  memoryStorage,
+  randomNonce,
+} from '../../src/index.js';
+
+/** Transport stub that emits a single canned frame then closes — enough
+ * for the passive `Vault.probeHub` read (it never sends HelloPeer). */
+function oneFrameTransport(frame: Frame): TransportAdapter {
+  return {
+    async connect() {
+      const wire = encodeFrame(frame);
+      let sent = false;
+      return {
+        async send() {},
+        async *recv() {
+          if (!sent) {
+            sent = true;
+            yield wire;
+          }
+        },
+        channelBinding: () => null,
+        async close() {},
+      };
+    },
+  };
+}
 
 async function freshVault(opts?: Partial<CreateOptions>) {
   const storage = memoryStorage();
@@ -180,5 +212,48 @@ describe('MemoryStorage', () => {
     expect(await s.loadIdentitySeed()).toBeNull();
     await s.saveIdentitySeed(new Uint8Array(32));
     expect((await s.loadIdentitySeed())!.length).toBe(32);
+  });
+});
+
+describe('Vault.probeHub', () => {
+  it('returns the vault id/name the hub announces', async () => {
+    const id = Identity.generate();
+    const hubPk = id.pubkey().bytes();
+    const transport = oneFrameTransport({
+      t: 'hello_hub',
+      vault_id: '86bbe9e0-9076-49a3-8019-0bd37c17406c',
+      hub_identity_pubkey: hubPk,
+      hub_nonce: randomNonce(),
+      tls_cert_fingerprint: new Uint8Array(32),
+      vault_name: 'careerbot',
+    });
+    const info = await Vault.probeHub({ rendezvousUrl: 'wss://hub', transport });
+    expect(info.vaultId).toBe('86bbe9e0-9076-49a3-8019-0bd37c17406c');
+    expect(info.vaultName).toBe('careerbot');
+    expect(Array.from(info.hubPubkey)).toEqual(Array.from(hubPk));
+    id.free();
+  });
+
+  it('surfaces a hub error frame', async () => {
+    const transport = oneFrameTransport({ t: 'error', message: 'unauthorized' });
+    await expect(Vault.probeHub({ rendezvousUrl: 'wss://hub', transport })).rejects.toThrow(
+      /hub rejected probe: unauthorized/,
+    );
+  });
+
+  it('rejects when the hub closes before sending hello_hub', async () => {
+    const transport: TransportAdapter = {
+      async connect() {
+        return {
+          async send() {},
+          async *recv() {},
+          channelBinding: () => null,
+          async close() {},
+        };
+      },
+    };
+    await expect(Vault.probeHub({ rendezvousUrl: 'wss://hub', transport })).rejects.toThrow(
+      /connection closed before hello_hub/,
+    );
   });
 });

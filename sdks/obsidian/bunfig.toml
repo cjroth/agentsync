@@ -1,0 +1,9 @@
+# Bun test configuration for the Obsidian plugin.
+# `bun test --coverage` produces line + function coverage; we use it as a
+# guardrail rather than a hard CI failure (Bun's coverageThreshold support
+# matures over time — assertions live in the test bodies).
+
+[test]
+coverageReporter = ["text"]
+coverageSkipTestFiles = true
+preload = ["./test/setup.ts"]

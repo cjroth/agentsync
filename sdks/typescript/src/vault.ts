@@ -67,6 +67,24 @@ function hexOf(bytes: Uint8Array): string {
 export interface CreateOptions extends VaultOptions {}
 export interface OpenOptions extends VaultOptions {}
 
+/** Options for {@link Vault.probeHub}. */
+export interface ProbeOptions {
+  /** Hub WebSocket URL to probe. */
+  rendezvousUrl: string;
+  /** Transport adapter; defaults to the SDK's auto-detected WebSocket. */
+  transport?: TransportAdapter;
+}
+
+/** What a hub announces about itself in its opening `HelloHub` frame. */
+export interface HubInfo {
+  /** The vault id this hub serves — adopt this when joining. */
+  vaultId: string;
+  /** The hub's ed25519 identity pubkey (raw bytes), for TOFU pinning. */
+  hubPubkey: Uint8Array;
+  /** Human-readable vault name, if the hub advertises one. */
+  vaultName: string | null;
+}
+
 /**
  * The high-level entry point. `Vault.create` initializes a fresh vault
  * (generates a vault_id, seeds `authorized_keys` with the creator's
@@ -112,6 +130,45 @@ export class Vault {
     const bytes = doc.save();
     await options.storage.saveDoc(bytes);
     return new Vault(wasm, options, doc, identity, vaultId, ownsIdentity);
+  }
+
+  /**
+   * Ask a hub which vault it serves, without joining it. Opens the
+   * transport, reads the hub's opening `HelloHub` frame, and closes —
+   * no identity, no authentication, no doc. This is how a joining peer
+   * discovers the vault id instead of being told it out-of-band (the
+   * `agentsync clone <url>` model: the hub mints its own id, so the id
+   * is never something the user can know up front).
+   *
+   * The hub sends `HelloHub` immediately on connect (before it expects
+   * `HelloPeer`), so a passive read is sufficient.
+   */
+  static async probeHub(wasm: WasmBindings, options: ProbeOptions): Promise<HubInfo> {
+    const url = options.rendezvousUrl;
+    if (!url) throw new Error('rendezvousUrl is required to probe');
+    const transport = options.transport ?? defaultTransport();
+    const conn = await transport.connect(url);
+    try {
+      const recvIter = conn.recv()[Symbol.asyncIterator]();
+      const r = await withTimeout(recvIter.next(), HANDSHAKE_TIMEOUT_MS);
+      if (r.done) throw new Error('connection closed before hello_hub');
+      const frame = wasm.decodeFrame(r.value);
+      if (frame.t === 'error') {
+        throw new Error(`hub rejected probe: ${frame.message}`);
+      }
+      if (frame.t !== 'hello_hub') {
+        throw new Error(`expected hello_hub, got ${frame.t}`);
+      }
+      return {
+        vaultId: frame.vault_id,
+        hubPubkey: frame.hub_identity_pubkey,
+        vaultName: frame.vault_name ?? null,
+      };
+    } finally {
+      try {
+        await conn.close();
+      } catch {}
+    }
   }
 
   /** Open an existing vault from storage; errors if no doc exists. */
@@ -407,6 +464,12 @@ export class Vault {
 
     // 3. Hub → Peer: ProofHub
     const proofHub = await nextFrame();
+    if (proofHub.t === 'error') {
+      // Hub rejected the handshake. Almost always: this peer's pubkey
+      // isn't in the hub's `authorized_keys`. Surface the message so the
+      // operator can tell at a glance.
+      throw new Error(`hub rejected handshake: ${proofHub.message}`);
+    }
     if (proofHub.t !== 'proof_hub') {
       throw new Error(`expected proof_hub, got ${proofHub.t}`);
     }

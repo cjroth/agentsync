@@ -6,7 +6,12 @@
 // Both entry points expose the same TypeScript surface.
 
 import * as wasm from '#wasm-nodejs';
-import { type CreateOptions, type OpenOptions, Vault as VaultClass } from './vault.js';
+import {
+  type CreateOptions,
+  type OpenOptions,
+  type ProbeOptions,
+  Vault as VaultClass,
+} from './vault.js';
 import { wrap } from './wrapper.js';
 
 const wasmModule = wrap(wasm);
@@ -36,10 +41,14 @@ export const Vault = {
   open(opts: OpenOptions) {
     return VaultClass.open(wasmModule, opts);
   },
+  /** Discover a hub's vault id (and identity) without joining. */
+  probeHub(opts: ProbeOptions) {
+    return VaultClass.probeHub(wasmModule, opts);
+  },
 };
 
 export type { Vault as VaultInstance } from './vault.js';
-export type { CreateOptions, OpenOptions } from './vault.js';
+export type { CreateOptions, HubInfo, OpenOptions, ProbeOptions } from './vault.js';
 export type {
   AuthorizedPeer,
   DirectoryMeta,
@@ -59,3 +68,26 @@ export type {
 export { MemoryStorage, memoryStorage } from './adapters/memory-storage.js';
 export { NodeFsStorage, nodeFsStorage } from './adapters/node-fs-storage.js';
 export { nodeWsTransport } from './adapters/ws-transport-node.js';
+
+export {
+  type AgentsyncConfig,
+  type IdentitySection,
+  type SyncSection,
+  type TomlDoc,
+  type TomlValue,
+  type VaultSection,
+  applyConfigToDoc,
+  configFromDoc,
+  defaultConfig,
+  defaultSyncSection,
+  parseConfig,
+  parseTomlDoc,
+  serializeConfig,
+  stringifyTomlDoc,
+} from './config.js';
+
+export {
+  formatAgentsyncIdentity,
+  formatPubkeySidecar,
+  parseAgentsyncIdentity,
+} from './identity-file.js';

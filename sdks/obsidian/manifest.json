@@ -1,0 +1,10 @@
+{
+  "id": "agentsync-sync",
+  "name": "Agentsync",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Sync your vault to a self-hosted agentsync hub. Cross-device, end-to-end authenticated, Automerge-backed.",
+  "author": "agentsync",
+  "authorUrl": "https://github.com/cjroth/agentsync",
+  "isDesktopOnly": false
+}

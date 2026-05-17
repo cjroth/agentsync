@@ -24,6 +24,10 @@
       "types": "./dist/web.d.ts",
       "default": "./dist/web.js"
     },
+    "./web-init": {
+      "types": "./dist/web-init.d.ts",
+      "default": "./dist/web-init.js"
+    },
     "./node": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -34,6 +38,10 @@
     "./wasm/bundler": {
       "types": "./dist/bundler/agentsync_wasm.d.ts",
       "default": "./dist/bundler/agentsync_wasm.js"
+    },
+    "./wasm/web": {
+      "types": "./dist/web-pkg/agentsync_wasm.d.ts",
+      "default": "./dist/web-pkg/agentsync_wasm.js"
     }
   },
   "files": [
@@ -71,6 +79,7 @@
   },
   "imports": {
     "#wasm-nodejs": "./dist/nodejs/agentsync_wasm.js",
-    "#wasm-bundler": "./dist/bundler/agentsync_wasm.js"
+    "#wasm-bundler": "./dist/bundler/agentsync_wasm.js",
+    "#wasm-web": "./dist/web-pkg/agentsync_wasm.js"
   }
 }

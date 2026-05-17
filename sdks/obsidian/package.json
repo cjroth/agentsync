@@ -1,0 +1,35 @@
+{
+  "name": "@agentsync/obsidian-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Obsidian plugin for agentsync — sync your vault to a self-hosted hub.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "install:vault": "bun run build && node scripts/install-vault.mjs",
+    "lint": "biome check src test",
+    "lint:fix": "biome check --write src test",
+    "format": "biome format --write src test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test test/unit --coverage",
+    "test:e2e": "bun test test/e2e --timeout=60000",
+    "test:all": "bun run test && bun run test:e2e"
+  },
+  "dependencies": {
+    "@agentsync/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.1.13",
+    "@types/node": "^22.9.0",
+    "esbuild": "^0.25.5",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "bun": ">=1.1",
+    "node": ">=18"
+  }
+}

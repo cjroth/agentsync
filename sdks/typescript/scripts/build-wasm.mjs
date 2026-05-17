@@ -67,6 +67,7 @@ mkdirSync(distRoot, { recursive: true });
 
 buildTarget('bundler', 'bundler');
 buildTarget('nodejs', 'nodejs');
+buildTarget('web', 'web-pkg');
 
 // Mirror the raw .wasm into dist/wasm/ so the `./wasm` subpath export
 // resolves to a single canonical binary regardless of glue target.
@@ -86,6 +87,9 @@ for (const f of [
   'nodejs/agentsync_wasm.js',
   'nodejs/agentsync_wasm.d.ts',
   'nodejs/agentsync_wasm_bg.wasm',
+  'web-pkg/agentsync_wasm.js',
+  'web-pkg/agentsync_wasm.d.ts',
+  'web-pkg/agentsync_wasm_bg.wasm',
 ]) {
   if (!existsSync(join(distRoot, f))) {
     throw new Error(`expected wasm-pack to emit ${f}`);
